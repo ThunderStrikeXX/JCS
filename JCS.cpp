@@ -8,12 +8,13 @@
 
 // =========== PARAMETERS
 const int N = 100;                      // Number of spatial cells [-]
-const double L = 10.0;                  // Length of the domain [m]
+const double L = 1.0;                   // Length of the domain [m]
 const double dx = L / N;                // Axial length of the volumes [m]
 const double CFL = 0.8;                 // CFL Number [-]
 const double gamma = 1.4;               // Ratio of specific heats (Ideal Gas) [-]
 const double gravity_x = 0.0;           // g_x [(Set to -9.81 if vertical) [m/s2]
-const double section = 1.0;             // Constant Area A_v [for this test]m2]
+const double section = 1.0;             // Constant Area A_v [m2]
+const double R_vapor = 361.5;           // Sodium vapor constant [J/kgK]
 
 // Newton-Krylov settings
 const int max_newton_iters = 20;        // Maximum number of outer iterations [-]
@@ -136,30 +137,37 @@ int main() {
     VectorGlobal Q_n(3 * N);            // Old Newton state
     VectorGlobal Q_new(3 * N);          // New Newton state
 
+    double p_initial = 10000.0;                                 // 10,000 Pa
+    double T_initial = 300.0;                                   // 300 K
+    double u_initial = 1.0;                                     // 0 m/s
+    double rho_initial = p_initial / (R_vapor * T_initial);     // Density according to EOS
+
     for (int i = 0; i < N; ++i) {
 
-        // Initial conditions
-        double rho = (i < N / 2) ? 1.0 : 0.125;
-        double p = (i < N / 2) ? 1.0 : 0.1;
-        double u = 0.0;
+        double E = p_initial / ((gamma - 1.0) * rho_initial) + 0.5 * u_initial * u_initial;
 
-        // Convert to Conservative Variables [rhoA, rhouA, rhoEA]
-        // E = p / ((gamma-1)rho) + 0.5 u^2
-        double E = p / ((gamma - 1.0) * rho) + 0.5 * u * u;
-
-        Q_n(3 * i + 0) = rho * section;
-        Q_n(3 * i + 1) = rho * u * section;
-        Q_n(3 * i + 2) = rho * E * section;
+        // Riempimento Vettore di Stato Q = [rho, rho*u, rho*E] * Area
+        Q_n(3 * i + 0) = rho_initial * section;
+        Q_n(3 * i + 1) = rho_initial * u_initial * section;
+        Q_n(3 * i + 2) = rho_initial * E * section;
     }
 
     Q_new = Q_n;
 
-    double dt = 0.005;      // Time step [s]
-    double t_final = 0.1;   // Final time [s]
+    double dt = 0.00000001;      // Time step [s]
+    double t_final = 1.0;   // Final time [s]
     double time = 0.0;      // Actual time [s]
 
     std::cout << "Starting Newton-Krylov FVM Solver..." << std::endl;
     std::cout << "Grid: " << N << " cells. System Size: " << 3 * N << std::endl;
+
+    // 1. APRI IL FILE PRIMA DEL LOOP TEMPORALE
+    std::ofstream file("history.csv");
+    // Aggiungi la colonna 'time' all'intestazione
+    file << "time,x,rho,u,p,T,energy\n";
+
+    // =========== TIME STEPPING LOOP
+    int step_counter = 0; // Contatore per decidere ogni quanto salvare
 
     // =========== TIME STEPPING LOOP
     while (time < t_final) {
@@ -178,20 +186,84 @@ int main() {
             // Loop over cells to build Residual and Jacobian
             for (int i = 0; i < N; ++i) {
 
-                // Indices for current, left, right cells
-                int idx_c = i;
-                int idx_l = (i == 0) ? i : i - 1;               // Neumann BC at left
-                int idx_r = (i == N - 1) ? i : i + 1;           // Neumann BC at right
+                // =========== BOUNDARY CONDITIONS
+                Vector3 Uc = Q_new.segment<3>(3 * i);
 
-                // Get States
-                Vector3 Uc = Q_new.segment<3>(3 * idx_c);
-                Vector3 Ul = Q_new.segment<3>(3 * idx_l);
-                Vector3 Ur = Q_new.segment<3>(3 * idx_r);
+                // Recupero primitive interne per calcoli BC
+                double rho_in = Uc(0) / section;
+                double u_in = Uc(1) / Uc(0);
+                double p_in = get_pA(Uc) / section;
+                double T_in = p_in / (rho_in * R_vapor);
+
+                // Left ghost cell construction
+                Vector3 Ul;
+
+                if (i > 0) {
+                    
+                    // Standard case, left neighbor
+                    Ul = Q_new.segment<3>(3 * (i - 1));
+                }
+                else {
+
+                    // u=0 (Dirichlet), p=Neumann, T=350 (Dirichlet)
+
+                    // 1. Velocity: symmetrical value to have 0 at the face
+                    // u_ghost = -u_internal => u_face = 0.5*(-u + u) = 0
+                    double u_b = 1.0;
+
+                    // 2. Pressure: Neumann (copy)
+                    double p_b = p_in;
+
+                    // 3. Temperatura: Dirichlet 350 K
+                    // Fixed value
+                    double T_b = 350.0;
+
+                    // 4. Density calculation from EOS
+                    double rho_b = p_b / (R_vapor * T_b);
+
+                    // 5. Rebuilding of left ghost face vector
+                    double E_b = p_b / ((gamma - 1.0) * rho_b) + 0.5 * u_b * u_b;
+
+                    Ul(0) = rho_b * section;
+                    Ul(1) = rho_b * u_b * section;
+                    Ul(2) = rho_b * E_b * section;
+                }
+
+                // Right ghost cell construction
+                Vector3 Ur;
+                if (i < N - 1) {
+
+                    // Standard case, right neighbor
+                    Ur = Q_new.segment<3>(3 * (i + 1));
+                }
+                else {
+
+                    // u=Neumann, p=10000 (Dirichlet), T=Neumann
+
+                    // 1. Velocity: Neumann (copia)
+                    double u_b = u_in;
+
+                    // 2. Pressure: Dirichlet 10000 Pa
+                    // Fixed value
+                    double p_b = 10000.0;
+
+                    // 3. Temperature: Neumann (copy)
+                    double T_b = 300;
+
+                    // 4. Density from EOS
+                    double rho_b = p_b / (R_vapor * T_b);
+
+                    // 5. Rebuilding of right ghost face vector
+                    double E_b = p_b / ((gamma - 1.0) * rho_b) + 0.5 * u_b * u_b;
+                    Ur(0) = rho_b * section;
+                    Ur(1) = rho_b * u_b * section;
+                    Ur(2) = rho_b * E_b * section;
+                }
 
                 // → Compute residual
                 
                 // Term 1: Time derivative (Backward Euler)
-                Vector3 time_term = (Uc - Q_n.segment<3>(3 * idx_c)) * (dx / dt);
+                Vector3 time_term = (Uc - Q_n.segment<3>(3 * i)) * (dx / dt);
 
                 // Term 2: Flux Divergence (Central + Dissipation)
                 // With scalar artificial dissipation to stabilize the central scheme
@@ -250,18 +322,22 @@ int main() {
                 Matrix3 A_l = computeFluxJacobian(Ul);
                 Matrix3 J_left = -0.5 * A_l - 0.5 * nu_l * Matrix3::Identity();
 
-                // Fill Sparse Matrix Triplets
-                // Block Diag
+                // =========================================================
+                // Fill Sparse Matrix Triplets (JACOBIAN ASSEMBLY)
+                // =========================================================
+
+                // 1. BLOCCO DIAGONALE (Sempre presente)
                 for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++)
                     tripletList.push_back({ 3 * i + r, 3 * i + c, J_diag(r,c) });
 
-                // Block Right
+                // 2. BLOCCO DESTRO (Interazione con i+1)
                 if (i < N - 1) {
+
                     for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++)
                         tripletList.push_back({ 3 * i + r, 3 * (i + 1) + c, J_right(r,c) });
                 }
 
-                // Block Left
+                // 3. BLOCCO SINISTRO (Interazione con i-1)
                 if (i > 0) {
                     for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++)
                         tripletList.push_back({ 3 * i + r, 3 * (i - 1) + c, J_left(r,c) });
@@ -280,7 +356,7 @@ int main() {
 
             // Preconditioning and solver settings
             solver.preconditioner().setDroptol(0.001); // Drops elements < 0.001 * row_norm
-            solver.preconditioner().setFillfactor(7);  // // Cap preconditioner size at 7x original matrix
+            solver.preconditioner().setFillfactor(7);  // Cap preconditioner size at 7x original matrix
             solver.setMaxIterations(100);              // Maximum iterations for linear solver
             solver.setTolerance(1e-6);                 // Maximum tolerance for linear solver
             solver.compute(J_global);
@@ -302,31 +378,41 @@ int main() {
             Q_new += deltaQ;
         }
 
+        std::cout << "Time: " << time << std::endl;
+
+        for (int i = 0; i < N; ++i) {
+            Vector3 Q = Q_n.segment<3>(3 * i);
+
+            // Calculating primitive values
+            double rho = Q(0) / section;
+            double u = 0.0;
+            if (Q(0) > 1e-8) u = Q(1) / Q(0);
+
+            double p = get_pA(Q) / section;
+            double energy = 0.0;
+            if (Q(0) > 1e-8) energy = Q(2) / Q(0);
+
+            double T = 0.0;
+            if (rho > 1e-8) {
+                T = p / (rho * R_vapor);
+            }
+
+            double x = (i + 0.5) * dx;
+
+            file << time << "," << x << "," << rho << "," << u << "," << p << "," << T << "," << energy << "\n";
+        }
+
+        file.flush();
+
         // Advance Time
         Q_n = Q_new;
         time += dt;
-        std::cout << "Time: " << time << " | Density Center: " << Q_n(3 * (N / 2)) << std::endl;
+        step_counter++;
     }
 
-    // =========== EXPORTING DATA
-    std::ofstream file("results.csv");
-    file << "x,rho,u,p,energy\n"; // Header
-
-    for (int i = 0; i < N; ++i) {
-        Vector3 Q = Q_n.segment<3>(3 * i);
-        double rho = Q(0) / section;
-        double u = Q(1) / Q(0);
-        double p = get_pA(Q) / section;
-        double energy = Q(2) / Q(0); // Energia totale specifica
-
-        // Posizione centro cella
-        double x = (i + 0.5) * dx;
-
-        file << x << "," << rho << "," << u << "," << p << "," << energy << "\n";
-    }
     file.close();
-    std::cout << "Data saved in results.csv" << std::endl;
 
-    std::cout << "Simulation Complete." << std::endl;
+    std::cout << "Simulation Complete. Data saved in history.csv" << std::endl;
+
     return 0;
 }
