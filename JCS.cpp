@@ -18,8 +18,8 @@ const double CONDUCTIVITY = 1.0;    // Thermal conductivity k [W/m·K]
 const double VISCOSITY = 1e-5;      // Dynamic viscosity mu [Pa·s]
 
 // Newton-Raphson settings
-const int    MAX_NEWTON_ITERS = 10;
-const double NEWTON_TOL = 1e-2;
+const int    MAX_NEWTON_ITERS = 1000;
+const double NEWTON_TOL = 1e-6;
 const int    REFACTOR_EVERY = 1;
 const int    SAVE_EVERY = 10;
 
@@ -86,20 +86,6 @@ Eigen::RowVector3d dRcond_dQr(const Vector3& Qr) {
     return -CONDUCTIVITY * AREA / (dx * dx) * dTdQ(Qr);
 }
 
-// =========== VISCOSITY ===========
-//
-// Adds  d/dx(mu * du/dx) * A  to momentum equation:
-//   R_visc_mom = -mu*A/dx² * (u_l - 2*u_c + u_r)
-//
-// Adds  d/dx(mu * u * du/dx) * A  to energy equation (viscous dissipation):
-//   R_visc_en  = -mu*A/dx² * (u_l*u_l - 2*u_c*u_c + u_r*u_r) / 2
-//              ≈ -mu*A/dx² * u_c * (u_l - 2*u_c + u_r)   [linearized]
-//
-// du/dQ:  u = Q1/Q0
-//   du/dQ0 = -Q1/Q0² = -u/rhoA
-//   du/dQ1 =  1/Q0   =  1/rhoA
-//   du/dQ2 =  0
-
 Eigen::RowVector3d dudQ(const Vector3& Q) {
     double rhoA = Q(0), u = get_u(Q);
     return { -u / rhoA, 1.0 / rhoA, 0.0 };
@@ -107,7 +93,7 @@ Eigen::RowVector3d dudQ(const Vector3& Q) {
 
 // Momentum viscous residual (scalar)
 double viscMomResidual(const Vector3& Ql, const Vector3& Qc, const Vector3& Qr) {
-    return -VISCOSITY * AREA / (dx * dx) * (get_u(Ql) - 2.0 * get_u(Qc) + get_u(Qr));
+    return -(4.0 / 3.0) * VISCOSITY * AREA / (dx * dx) * (get_u(Ql) - 2.0 * get_u(Qc) + get_u(Qr));
 }
 
 // Energy viscous residual (scalar) — viscous work: d/dx(mu*u*du/dx)*A
@@ -115,44 +101,37 @@ double viscEnResidual(const Vector3& Ql, const Vector3& Qc, const Vector3& Qr) {
     double uc = get_u(Qc);
     double ul = get_u(Ql);
     double ur = get_u(Qr);
-    // Discretize d/dx(mu*u*du/dx) ≈ mu/dx² * (u_{i+1/2}*(u_{i+1}-u_i) - u_{i-1/2}*(u_i-u_{i-1}))
-    // with u at face = average of neighbors
+
     double u_right = 0.5 * (uc + ur);
     double u_left = 0.5 * (ul + uc);
-    return -VISCOSITY * AREA / (dx * dx) * (u_right * (ur - uc) - u_left * (uc - ul));
+    return -(4.0 / 3.0) * VISCOSITY * AREA / (dx * dx) * (u_right * (ur - uc) - u_left * (uc - ul));
 }
 
 // Jacobian rows for viscous momentum term
 Eigen::RowVector3d dRviscMom_dQl(const Vector3& Ql) {
-    return -VISCOSITY * AREA / (dx * dx) * dudQ(Ql);
+    return -(4.0 / 3.0) * VISCOSITY * AREA / (dx * dx) * dudQ(Ql);
 }
 Eigen::RowVector3d dRviscMom_dQc(const Vector3& Qc) {
-    return  VISCOSITY * AREA / (dx * dx) * 2.0 * dudQ(Qc);
+    return  (4.0 / 3.0) * VISCOSITY * AREA / (dx * dx) * 2.0 * dudQ(Qc);
 }
 Eigen::RowVector3d dRviscMom_dQr(const Vector3& Qr) {
-    return -VISCOSITY * AREA / (dx * dx) * dudQ(Qr);
+    return -(4.0 / 3.0) * VISCOSITY * AREA / (dx * dx) * dudQ(Qr);
 }
 
 // Jacobian rows for viscous energy term (linearized around current u_c)
 Eigen::RowVector3d dRviscEn_dQl(const Vector3& Ql, const Vector3& Qc) {
     double uc = get_u(Qc), ul = get_u(Ql);
     double u_left = 0.5 * (ul + uc);
-    // d/dQl: -mu*A/dx² * (-u_left * (-1)) = -mu*A/dx² * u_left * dudQ(Ql)*0.5 ...
-    // Full derivative:
-    // dR/dQl = -mu*A/dx² * [ -0.5*(ur-uc)*dudQ(Ql=0) + u_left*(+dudQ(Ql)) ]
-    //        = -mu*A/dx² * u_left * dudQ(Ql)
+
     return -VISCOSITY * AREA / (dx * dx) * u_left * dudQ(Ql);
 }
 Eigen::RowVector3d dRviscEn_dQc(const Vector3& Ql, const Vector3& Qc, const Vector3& Qr) {
     double uc = get_u(Qc), ul = get_u(Ql), ur = get_u(Qr);
     double u_right = 0.5 * (uc + ur);
     double u_left = 0.5 * (ul + uc);
-    // dR/dQc = -mu*A/dx² * [ 0.5*(ur-uc)*dudQ(Qc) - u_right*dudQ(Qc)
-    //                       + 0.5*(uc-ul)*dudQ(Qc) + u_left*(-dudQ(Qc)) ... ]
-    // Simplified:
+
     double coeff = (ur - uc) * 0.5 - u_right - (uc - ul) * 0.5 - u_left;
-    // = 0.5*ur - 0.5*uc - 0.5*uc - 0.5*ur - 0.5*uc + 0.5*ul - 0.5*ul - 0.5*uc
-    // = -2*uc
+
     return -VISCOSITY * AREA / (dx * dx) * (-2.0 * uc) * dudQ(Qc);
 }
 Eigen::RowVector3d dRviscEn_dQr(const Vector3& Qc, const Vector3& Qr) {
@@ -247,11 +226,13 @@ int main() {
                 // --- Convective fluxes (Rusanov) ---
                 Vector3 Fc = computeFlux(Uc), Fl = computeFlux(Ul), Fr = computeFlux(Ur);
 
+                double eps = 1e-8;
+
                 double sp_c = std::abs(u_in) + get_sound_speed(Uc);
                 double sp_l = std::abs(get_u(Ul)) + get_sound_speed(Ul);
                 double sp_r = std::abs(get_u(Ur)) + get_sound_speed(Ur);
-                double nu_l = 0.5 * std::max(sp_c, sp_l);
-                double nu_r = 0.5 * std::max(sp_c, sp_r);
+                double nu_l = eps * std::max(sp_c, sp_l);
+                double nu_r = eps * std::max(sp_c, sp_r);
 
                 Vector3 F_right = 0.5 * (Fc + Fr) - 0.5 * nu_r * (Ur - Uc);
                 Vector3 F_left = 0.5 * (Fl + Fc) - 0.5 * nu_l * (Uc - Ul);
@@ -272,7 +253,7 @@ int main() {
 
                 // --- Jacobian blocks ---
                 Matrix3 Jd = Matrix3::Identity() * (dx / dt)
-                    + (nu_l + nu_r) * Matrix3::Identity()
+                    + 0.5 * (nu_l + nu_r) * Matrix3::Identity()
                     - computeSourceJacobian(Uc) * dx;
 
                 Matrix3 Jr = 0.5 * computeFluxJacobian(Ur) - 0.5 * nu_r * Matrix3::Identity();
@@ -302,6 +283,8 @@ int main() {
             }
 
             double res_norm = Residual.norm();
+            // std::cout << "  iter=" << iter << " |R|=" << res_norm << "\n";
+
             if (res_norm < NEWTON_TOL) break;
 
             if (!factorized || iter % REFACTOR_EVERY == 0) {
