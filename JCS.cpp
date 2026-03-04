@@ -7,22 +7,22 @@
 #include <fstream>
 
 // =========== PARAMETERS ===========
-const int    N = 100;           // Number of spatial cells [-]
-const double L = 1.0;           // Domain length [m]
-const double dx = L / N;        // Cell width [m]
-const double GAMMA = 1.57;      // Gamma [-]
-const double GRAVITY_X = 0.0;   // Axial gravity [m/s²]
-const double AREA = 1.0;       // Constant cross-sectional area [m²]
-const double R_GAS = 361.5;     // Specific gas constant for sodium vapor [J/kg·K]
-const double CONDUCTIVITY = 0.01; // Thermal conductivity k [W/m·K]
+const int    N = 100;               // Number of spatial cells [-]
+const double L = 1.0;               // Domain length [m]
+const double dx = L / N;            // Cell width [m]
+const double GAMMA = 1.57;          // Gamma [-]
+const double GRAVITY_X = 0.0;       // Axial gravity [m/s²]
+const double AREA = 1.0;            // Constant cross-sectional area [m²]
+const double R_GAS = 361.5;         // Specific gas constant for sodium vapor [J/kg·K]
+const double CONDUCTIVITY = 1.0;    // Thermal conductivity k [W/m·K]
 
 // Friction model
 const double FRICTION_COEFF = 0.0;
 
 // Newton-Raphson settings
-const int    MAX_NEWTON_ITERS = 5;
+const int    MAX_NEWTON_ITERS = 10;
 const double NEWTON_TOL = 1e-2;
-const int    REFACTOR_EVERY = 3;
+const int    REFACTOR_EVERY = 1;
 const int    SAVE_EVERY = 10;
 
 using Vector3 = Eigen::Vector3d;
@@ -45,9 +45,7 @@ double get_sound_speed(const Vector3& Q) {
 
 double get_T(const Vector3& Q) {
     if (Q(0) < 1e-8) return 0.0;
-    double pA = get_pA(Q);
-    double rho = Q(0) / AREA;
-    return pA / (AREA * rho * R_GAS);
+    return get_pA(Q) / (Q(0) * R_GAS);
 }
 
 // =========== FLUX AND SOURCE ===========
@@ -121,6 +119,7 @@ Matrix3 computeSourceJacobian(const Vector3& Q) {
 
 // =========== TIMESTEP ===========
 
+/*
 double compute_dt(const VectorGlobal& Q) {
     double max_speed = 0.0;
     for (int i = 0; i < N; ++i) {
@@ -129,8 +128,9 @@ double compute_dt(const VectorGlobal& Q) {
         max_speed = std::max(max_speed, speed);
     }
     if (max_speed < 1e-12) return 1e-4;
-    return 1e-3;
+    return 1e-1;
 }
+*/
 
 // =========== BOUNDARY CONDITIONS ===========
 
@@ -166,8 +166,8 @@ int main() {
         }
     }
 
-    Q_new = Q_n;
-    double t_final = 1.0, time = 0.0;
+    double t_final = 1.0, time = 0.0, dt = 1e-3;
+
     int step = 0;
 
     std::cout << "FVM Solver (Euler + thermal conduction) | N=" << N
@@ -178,9 +178,6 @@ int main() {
 
     // =========== TIME LOOP ===========
     while (time < t_final) {
-
-        double dt = compute_dt(Q_n);
-        if (time + dt > t_final) dt = t_final - time;
 
         Q_new = Q_n;
 
@@ -233,7 +230,6 @@ int main() {
                 // --- Jacobian blocks ---
                 Matrix3 J_diag = Matrix3::Identity() * (dx / dt)
                     + (nu_l + nu_r) * Matrix3::Identity()
-                    + 0.5 * computeFluxJacobian(Uc)
                     - computeSourceJacobian(Uc) * dx;
 
                 Matrix3 J_right = 0.5 * computeFluxJacobian(Ur) - 0.5 * nu_r * Matrix3::Identity();
@@ -273,7 +269,6 @@ int main() {
         // --- Output ---
         if (step % SAVE_EVERY == 0) {
 
-            std::cout << "t=" << time << " dt=" << dt << "\n";
             for (int i = 0; i < N; ++i) {
                 Vector3 Q = Q_new.segment<3>(3 * i);
                 double rho = Q(0) / AREA;
@@ -294,6 +289,9 @@ int main() {
 
         Q_n = Q_new;
         time += dt;
+
+        std::cout << "t=" << time << " dt=" << dt << "\n";
+
         step++;
     }
 
