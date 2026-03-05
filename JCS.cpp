@@ -5,9 +5,11 @@
 #include <vector>
 #include <cmath>
 #include <fstream>
+#include <chrono>
+#include <ctime>
 
 // =========== PARAMETERS ===========
-const int    N = 100;               // Number of spatial cells [-]
+const int    N = 400;               // Number of spatial cells [-]
 const double L = 1.0;               // Domain length [m]
 const double dx = L / N;            // Cell width [m]
 const double GAMMA = 1.57;          // Gamma [-]
@@ -197,6 +199,9 @@ int main() {
     std::ofstream f_rho("rho.txt"), f_u("u.txt"), f_p("p.txt"),
         f_T("T.txt"), f_energy("energy.txt");
 
+    auto wall_start = std::chrono::steady_clock::now();     // Wall time
+    std::clock_t cpu_start = std::clock();                  // CPU time
+
     // =========== TIME LOOP ===========
     while (time < t_final) {
 
@@ -320,11 +325,19 @@ int main() {
 
         Q_n = Q_new;
         time += dt;
-        std::cout << "t=" << time << " dt=" << dt << "\n";
         step++;
     }
 
     f_rho.close(); f_u.close(); f_p.close(); f_T.close(); f_energy.close();
-    std::cout << "Done. " << step << " steps.\n";
+
+    std::clock_t cpu_end = std::clock();
+    std::cout << "CPU time: " << (double)(cpu_end - cpu_start) / CLOCKS_PER_SEC << " s\n";
+
+    auto wall_end = std::chrono::steady_clock::now();
+    std::chrono::duration<double> wall_elapsed = wall_end - wall_start;
+    std::cout << "Wall clock time: " << wall_elapsed.count() << " s\n";
+
+    system("pause");
+
     return 0;
 }
