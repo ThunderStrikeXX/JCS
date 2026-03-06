@@ -155,16 +155,39 @@ Matrix3 computeSourceJacobian(const Vector3&) {
 
 // =========== BOUNDARY CONDITIONS ===========
 
-Vector3 leftGhostCell(double p_in) {
-    double u_b = 1.0, T_b = 350.0, rho_b = p_in / (R_GAS * T_b);
+Vector3 leftGhostCell(Vector3 Uc) {
+
+    double p_in = get_pA(Uc) / AREA;
+    double T_in = get_T(Uc);
+    double u_in = get_u(Uc);
+
+    double u_b = 2 * 1.0 - u_in;
+    double T_b = 2 * 350.0 - T_in;
+    double rho_b = p_in / (R_GAS * T_b);
     double E_b = p_in / ((GAMMA - 1.0) * rho_b) + 0.5 * u_b * u_b;
-    return { rho_b * AREA, rho_b * u_b * AREA, rho_b * E_b * AREA };
+
+    return { 
+        rho_b * AREA, 
+        rho_b * u_b * AREA, 
+        rho_b * E_b * AREA 
+    };
 }
 
-Vector3 rightGhostCell(double u_in, double T_in) {
-    double p_b = 10000.0, rho_b = p_b / (R_GAS * T_in);
+Vector3 rightGhostCell(Vector3 Uc) {
+
+    double p_in = get_pA(Uc) / AREA;
+    double T_in = get_T(Uc);
+    double u_in = get_u(Uc);
+
+    double p_b = 2 * 10000.0 - p_in;
+    double rho_b = p_b / (R_GAS * T_in);
     double E_b = p_b / ((GAMMA - 1.0) * rho_b) + 0.5 * u_in * u_in;
-    return { rho_b * AREA, rho_b * u_in * AREA, rho_b * E_b * AREA };
+
+    return { 
+        rho_b * AREA, 
+        rho_b * u_in * AREA, 
+        rho_b * E_b * AREA 
+    };
 }
 
 // =========== MAIN ===========
@@ -219,8 +242,8 @@ int main() {
                 double p_in = get_pA(Uc) / AREA;
                 double T_in = get_T(Uc);
 
-                Vector3 Ul = (i > 0) ? Q_new.segment<3>(3 * (i - 1)) : leftGhostCell(p_in);
-                Vector3 Ur = (i < N - 1) ? Q_new.segment<3>(3 * (i + 1)) : rightGhostCell(u_in, T_in);
+                Vector3 Ul = (i > 0) ? Q_new.segment<3>(3 * (i - 1)) : leftGhostCell(Uc);
+                Vector3 Ur = (i < N - 1) ? Q_new.segment<3>(3 * (i + 1)) : rightGhostCell(Uc);
 
                 // --- Convective fluxes (Rusanov) ---
                 Vector3 Fc = computeFlux(Uc), Fl = computeFlux(Ul), Fr = computeFlux(Ur);
@@ -231,8 +254,8 @@ int main() {
                 double sp_l = std::abs(get_u(Ul)) + get_sound_speed(Ul);
                 double sp_r = std::abs(get_u(Ur)) + get_sound_speed(Ur);
                 
-                double nu_l = std::max(sp_c, sp_l);
-                double nu_r = std::max(sp_c, sp_r);
+                double nu_l = eps * std::max(sp_c, sp_l);
+                double nu_r = eps * std::max(sp_c, sp_r);
 
                 Vector3 F_right = 0.5 * (Fc + Fr) - 0.5 * nu_r * (Ur - Uc);
                 Vector3 F_left = 0.5 * (Fl + Fc) - 0.5 * nu_l * (Uc - Ul);
