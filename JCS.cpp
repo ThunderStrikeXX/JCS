@@ -19,7 +19,6 @@ const double R_GAS = 361.5;         // Specific gas constant for sodium vapor [J
 const double CONDUCTIVITY = 1.0;    // Thermal conductivity k [W/m·K]
 const double VISCOSITY = 1e-5;      // Dynamic viscosity mu [Pa·s]
 
-// Newton-Raphson settings
 const int    MAX_NEWTON_ITERS = 1000;
 const double NEWTON_TOL = 1e-6;
 const int    REFACTOR_EVERY = 1;
@@ -29,8 +28,7 @@ using Vector3 = Eigen::Vector3d;
 using Matrix3 = Eigen::Matrix3d;
 using VectorGlobal = Eigen::VectorXd;
 
-// =========== EQUATION OF STATE ===========
-
+// =========== FUNCTIONS ===========
 double get_pA(const Vector3& Q) {
     if (Q(0) < 1e-8) return 0.0;
     return (GAMMA - 1.0) * (Q(2) - 0.5 * Q(1) * Q(1) / Q(0));
@@ -47,10 +45,7 @@ double get_T(const Vector3& Q) {
     return get_pA(Q) / (Q(0) * R_GAS);
 }
 
-// Returns u from conserved variables
 inline double get_u(const Vector3& Q) { return Q(1) / Q(0); }
-
-// =========== FLUX AND SOURCE ===========
 
 Vector3 computeFlux(const Vector3& Q) {
     double pA = get_pA(Q), u = get_u(Q);
@@ -62,16 +57,13 @@ Vector3 computeSource(const Vector3& Q) {
     return { 0.0, rhoA * GRAVITY_X, rhoA * u * GRAVITY_X };
 }
 
-// =========== THERMAL CONDUCTION ===========
-//
-// Adds  d/dx(k * dT/dx) * A  to energy equation:
-//   R_cond = -k*A/dx² * (T_l - 2*T_c + T_r)
-
 Eigen::RowVector3d dTdQ(const Vector3& Q) {
-    double rhoA = Q(0), u = get_u(Q);
-    double e_int = Q(2) / rhoA - 0.5 * u * u;
+
     double c = (GAMMA - 1.0) / R_GAS;
-    return { -c * (e_int + 0.5 * u * u) / rhoA, -c * u / rhoA, c / rhoA };
+    double rhoA = Q(0);
+    double E = Q(2) / Q(0);
+    double u = Q(1) / Q(0);
+    return { c * (-E + u * u) / rhoA, -c * u / rhoA, c / rhoA};
 }
 
 double conductionResidual(const Vector3& Ql, const Vector3& Qc, const Vector3& Qr) {
@@ -81,15 +73,19 @@ double conductionResidual(const Vector3& Ql, const Vector3& Qc, const Vector3& Q
 Eigen::RowVector3d dRcond_dQl(const Vector3& Ql) {
     return -CONDUCTIVITY * AREA / (dx * dx) * dTdQ(Ql);
 }
+
 Eigen::RowVector3d dRcond_dQc(const Vector3& Qc) {
     return  CONDUCTIVITY * AREA / (dx * dx) * 2.0 * dTdQ(Qc);
 }
+
 Eigen::RowVector3d dRcond_dQr(const Vector3& Qr) {
     return -CONDUCTIVITY * AREA / (dx * dx) * dTdQ(Qr);
 }
 
 Eigen::RowVector3d dudQ(const Vector3& Q) {
-    double rhoA = Q(0), u = get_u(Q);
+
+    double rhoA = Q(0);
+    double u = get_u(Q);
     return { -u / rhoA, 1.0 / rhoA, 0.0 };
 }
 
@@ -132,17 +128,16 @@ Eigen::RowVector3d dRviscEn_dQc(const Vector3& Ql, const Vector3& Qc, const Vect
     double u_right = 0.5 * (uc + ur);
     double u_left = 0.5 * (ul + uc);
 
-    double coeff = (ur - uc) * 0.5 - u_right - (uc - ul) * 0.5 - u_left;
+    double coeff = 0.5 * (ur - uc) - u_right
+        - 0.5 * (uc - ul) - u_left;
 
-    return -VISCOSITY * AREA / (dx * dx) * (-2.0 * uc) * dudQ(Qc);
+    return -(4.0 / 3.0) * VISCOSITY * AREA / (dx * dx) * coeff * dudQ(Qc);
 }
 Eigen::RowVector3d dRviscEn_dQr(const Vector3& Qc, const Vector3& Qr) {
     double uc = get_u(Qc), ur = get_u(Qr);
     double u_right = 0.5 * (uc + ur);
     return -VISCOSITY * AREA / (dx * dx) * u_right * dudQ(Qr);
 }
-
-// =========== FLUX JACOBIAN ===========
 
 Matrix3 computeFluxJacobian(const Vector3& Q) {
     double u = get_u(Q), u2 = u * u;
@@ -160,14 +155,12 @@ Matrix3 computeSourceJacobian(const Vector3&) {
 
 // =========== BOUNDARY CONDITIONS ===========
 
-// Left: u=0 (wall), T=350 K, p=Neumann
 Vector3 leftGhostCell(double p_in) {
     double u_b = 1.0, T_b = 350.0, rho_b = p_in / (R_GAS * T_b);
     double E_b = p_in / ((GAMMA - 1.0) * rho_b) + 0.5 * u_b * u_b;
     return { rho_b * AREA, rho_b * u_b * AREA, rho_b * E_b * AREA };
 }
 
-// Right: p=10000 Pa, T=300 K, u=Neumann
 Vector3 rightGhostCell(double u_in, double T_in) {
     double p_b = 10000.0, rho_b = p_b / (R_GAS * T_in);
     double E_b = p_b / ((GAMMA - 1.0) * rho_b) + 0.5 * u_in * u_in;
@@ -237,8 +230,9 @@ int main() {
                 double sp_c = std::abs(u_in) + get_sound_speed(Uc);
                 double sp_l = std::abs(get_u(Ul)) + get_sound_speed(Ul);
                 double sp_r = std::abs(get_u(Ur)) + get_sound_speed(Ur);
-                double nu_l = eps * std::max(sp_c, sp_l);
-                double nu_r = eps * std::max(sp_c, sp_r);
+                
+                double nu_l = std::max(sp_c, sp_l);
+                double nu_r = std::max(sp_c, sp_r);
 
                 Vector3 F_right = 0.5 * (Fc + Fr) - 0.5 * nu_r * (Ur - Uc);
                 Vector3 F_left = 0.5 * (Fl + Fc) - 0.5 * nu_l * (Uc - Ul);
