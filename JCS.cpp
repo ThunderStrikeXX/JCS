@@ -9,7 +9,7 @@
 #include <ctime>
 
 // =========== PARAMETERS ===========
-const int    N = 400;               // Number of spatial cells [-]
+const int    N = 100;               // Number of spatial cells [-]
 const double L = 1.0;               // Domain length [m]
 const double dx = L / N;            // Cell width [m]
 const double GAMMA = 1.57;          // Gamma [-]
@@ -162,14 +162,14 @@ Matrix3 computeSourceJacobian(const Vector3&) {
 
 // Left: u=0 (wall), T=350 K, p=Neumann
 Vector3 leftGhostCell(double p_in) {
-    double u_b = 0.0, T_b = 350.0, rho_b = p_in / (R_GAS * T_b);
+    double u_b = 1.0, T_b = 350.0, rho_b = p_in / (R_GAS * T_b);
     double E_b = p_in / ((GAMMA - 1.0) * rho_b) + 0.5 * u_b * u_b;
     return { rho_b * AREA, rho_b * u_b * AREA, rho_b * E_b * AREA };
 }
 
 // Right: p=10000 Pa, T=300 K, u=Neumann
-Vector3 rightGhostCell(double u_in) {
-    double p_b = 10000.0, T_b = 300.0, rho_b = p_b / (R_GAS * T_b);
+Vector3 rightGhostCell(double u_in, double T_in) {
+    double p_b = 10000.0, rho_b = p_b / (R_GAS * T_in);
     double E_b = p_b / ((GAMMA - 1.0) * rho_b) + 0.5 * u_in * u_in;
     return { rho_b * AREA, rho_b * u_in * AREA, rho_b * E_b * AREA };
 }
@@ -180,7 +180,7 @@ int main() {
 
     VectorGlobal Q_n(3 * N), Q_new(3 * N);
     {
-        double p0 = 10000.0, T0 = 300.0, u0 = 0.0;
+        double p0 = 10000.0, T0 = 300.0, u0 = 1.0;
         double rho0 = p0 / (R_GAS * T0);
         double E0 = p0 / ((GAMMA - 1.0) * rho0) + 0.5 * u0 * u0;
         for (int i = 0; i < N; ++i) {
@@ -224,9 +224,10 @@ int main() {
                 Vector3 Uc = Q_new.segment<3>(3 * i);
                 double u_in = get_u(Uc);
                 double p_in = get_pA(Uc) / AREA;
+                double T_in = get_T(Uc);
 
                 Vector3 Ul = (i > 0) ? Q_new.segment<3>(3 * (i - 1)) : leftGhostCell(p_in);
-                Vector3 Ur = (i < N - 1) ? Q_new.segment<3>(3 * (i + 1)) : rightGhostCell(u_in);
+                Vector3 Ur = (i < N - 1) ? Q_new.segment<3>(3 * (i + 1)) : rightGhostCell(u_in, T_in);
 
                 // --- Convective fluxes (Rusanov) ---
                 Vector3 Fc = computeFlux(Uc), Fl = computeFlux(Ul), Fr = computeFlux(Ur);
