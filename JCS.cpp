@@ -190,6 +190,22 @@ Vector3 rightGhostCell(Vector3 Uc) {
     };
 }
 
+Vector3 leftFaceState(const Vector3 & Uc) {
+    double p_b = get_pA(Uc) / AREA;   // zero-gradient
+    double rho_b = p_b / (R_GAS * 350.0);
+    double u_b = 1.0;
+    double E_b = p_b / ((GAMMA - 1.0) * rho_b) + 0.5 * u_b * u_b;
+    return { rho_b * AREA, rho_b * u_b * AREA, rho_b * E_b * AREA };
+}
+
+Vector3 rightFaceState(const Vector3& Uc) {
+    double p_b = 10000.0;
+    double T_b = get_T(Uc);            // zero-gradient
+    double u_b = get_u(Uc);            // zero-gradient
+    double rho_b = p_b / (R_GAS * T_b);
+    double E_b = p_b / ((GAMMA - 1.0) * rho_b) + 0.5 * u_b * u_b;
+    return { rho_b * AREA, rho_b * u_b * AREA, rho_b * E_b * AREA };
+}
 // =========== MAIN ===========
 
 int main() {
@@ -257,8 +273,21 @@ int main() {
                 double nu_l = eps * std::max(sp_c, sp_l);
                 double nu_r = eps * std::max(sp_c, sp_r);
 
-                Vector3 F_right = 0.5 * (Fc + Fr) - 0.5 * nu_r * (Ur - Uc);
-                Vector3 F_left = 0.5 * (Fl + Fc) - 0.5 * nu_l * (Uc - Ul);
+                Vector3 F_right, F_left;
+
+                if (i == 0) {
+                    F_left = computeFlux(leftFaceState(Uc));
+                }
+                else {
+                    F_left = 0.5 * (computeFlux(Ul) + computeFlux(Uc)) - 0.5 * nu_l * (Uc - Ul);
+                }
+
+                if (i == N - 1) {
+                    F_right = computeFlux(rightFaceState(Uc));
+                }
+                else {
+                    F_right = 0.5 * (computeFlux(Uc) + computeFlux(Ur)) - 0.5 * nu_r * (Ur - Uc);
+                }
 
                 // --- Cell residual ---
                 Vector3 R_cell = (Uc - Q_n.segment<3>(3 * i)) * (dx / dt)
@@ -296,6 +325,63 @@ int main() {
                 Jd.row(2) += dx * dRviscEn_dQc(Ul, Uc, Ur);
                 Jr.row(2) += dx * dRviscEn_dQr(Uc, Ur);
                 Jl.row(2) += dx * dRviscEn_dQl(Ul, Uc);
+
+                // ===== i=0 =====
+                if (i == 0) {
+                    double p_b = get_pA(Uc) / AREA;
+                    double rho_b = p_b / (R_GAS * 350.0);
+                    double u_b = 1.0;
+                    double E_b = R_GAS * 350.0 / (GAMMA - 1.0) + 0.5 * u_b * u_b;
+                    Vector3 Qbc = { rho_b * AREA, rho_b * u_b * AREA, rho_b * E_b * AREA };
+
+                    double c = AREA / (R_GAS * 350.0);
+                    Eigen::RowVector3d dp_dUc = { (GAMMA - 1.0) * 0.5 * u_in * u_in / AREA,
+                                                  -(GAMMA - 1.0) * u_in / AREA,
+                                                   (GAMMA - 1.0) / AREA };
+                    // dQbc/dUc: matrice 3x3 con righe = [1, u_b, E_b] * c * dp_dUc
+                    Matrix3 dQbc_dUc;
+                    dQbc_dUc.row(0) = c * dp_dUc;
+                    dQbc_dUc.row(1) = u_b * c * dp_dUc;
+                    dQbc_dUc.row(2) = E_b * c * dp_dUc;
+
+                    // Jd: termine temporale + Rusanov destro - dF_left/dUc
+                    Jd = Matrix3::Identity() * (dx / dt)
+                        + 0.5 * computeFluxJacobian(Uc) + 0.5 * nu_r * Matrix3::Identity()
+                        - computeFluxJacobian(Qbc) * dQbc_dUc;
+
+                    // Jr: solo interfaccia destra, identico all'originale
+                    Jr = 0.5 * computeFluxJacobian(Ur) - 0.5 * nu_r * Matrix3::Identity();
+                    Jl = Matrix3::Zero();
+                }
+
+                // ===== i=N-1 =====
+                if (i == N - 1) {
+                    double p_b = 10000.0;
+                    double T_b = get_T(Uc);
+                    double u_b = get_u(Uc);
+                    double rho_b = p_b / (R_GAS * T_b);
+                    double E_b = p_b / ((GAMMA - 1.0) * rho_b) + 0.5 * u_b * u_b;
+                    Vector3 Qbc = { rho_b * AREA, rho_b * u_b * AREA, rho_b * E_b * AREA };
+
+                    Eigen::RowVector3d dT_dUc = dTdQ(Uc);
+                    Eigen::RowVector3d du_dUc = dudQ(Uc);
+                    Eigen::RowVector3d drho_dUc = -p_b / (R_GAS * T_b * T_b) * dT_dUc;
+                    Eigen::RowVector3d dE_dUc = R_GAS / (GAMMA - 1.0) * dT_dUc + u_b * du_dUc;
+
+                    Matrix3 dQbc_dUc;
+                    dQbc_dUc.row(0) = AREA * drho_dUc;
+                    dQbc_dUc.row(1) = AREA * (u_b * drho_dUc + rho_b * du_dUc);
+                    dQbc_dUc.row(2) = AREA * (E_b * drho_dUc + rho_b * dE_dUc);
+
+                    // Jd: termine temporale + dF_right/dUc - Rusanov sinistro
+                    Jd = Matrix3::Identity() * (dx / dt)
+                        + computeFluxJacobian(Qbc) * dQbc_dUc
+                        - 0.5 * computeFluxJacobian(Uc) + 0.5 * nu_l * Matrix3::Identity();
+
+                    // Jl: solo interfaccia sinistra, identico all'originale
+                    Jl = -0.5 * computeFluxJacobian(Ul) + 0.5 * nu_l * Matrix3::Identity();
+                    Jr = Matrix3::Zero();
+                }
 
                 // --- Assemble ---
                 for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) {
