@@ -10,7 +10,7 @@
 #include <iomanip> 
 
 // =========== PARAMETERS ===========
-const int    N = 100;               // Number of spatial cells [-]
+const int    N = 50;               // Number of spatial cells [-]
 const double L = 1.0;               // Domain length [m]
 const double dx = L / N;            // Cell width [m]
 const double GAMMA = 1.57;          // Gamma [-]
