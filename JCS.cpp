@@ -294,6 +294,14 @@ int main() {
         double nu_l = eps * std::max(sp_c, sp_l);
         double nu_r = eps * std::max(sp_c, sp_r);
 
+        double M_face = std::max(
+            std::abs(get_u(Ul)) / get_sound_speed(Ul),
+            std::abs(get_u(Ur)) / get_sound_speed(Ur)
+        );
+        double scaling = std::min(1.0, std::max(M_face, 0.01)); // floor per stabilità
+        nu_l *= scaling;
+        nu_r *= scaling;
+
         Vector3 F_left = (cell > 0)
             ? 0.5 * (computeFlux(Ul) + computeFlux(Uc)) - 0.5 * nu_l * (Uc - Ul)
             : computeFlux(Ul);
@@ -543,6 +551,14 @@ int main() {
         double nu_l = eps * std::max(sp_c, sp_l);
         double nu_r = eps * std::max(sp_c, sp_r);
 
+        double M_face = std::max(
+            std::abs(get_u(Ul)) / get_sound_speed(Ul),
+            std::abs(get_u(Ur)) / get_sound_speed(Ur)
+        );
+        double scaling = std::min(1.0, std::max(M_face, 0.01)); // floor per stabilità
+        nu_l *= scaling;
+        nu_r *= scaling;
+
         Matrix3 Jd, Jl, Jr;
 
         if (cell == 0) {
@@ -678,13 +694,13 @@ int main() {
                 Vector3 Ul = (i > 0) ? Q_new.segment<3>(3 * (i - 1)) : leftFaceState(Uc);
                 Vector3 Ur = (i < N - 1) ? Q_new.segment<3>(3 * (i + 1)) : rightFaceState(Uc);
 
-                Residual.segment<3>(3 * i) = cell_residual_linear(Q_new, i);
+                Residual.segment<3>(3 * i) = cell_residual_rusanov(Q_new, i);
 
                 Matrix3 Jd = Matrix3::Zero();
                 Matrix3 Jl = Matrix3::Zero();
                 Matrix3 Jr = Matrix3::Zero();
 
-                std::tie(Jd, Jl, Jr) = cell_jacobian_linear(Q_new, i);
+                std::tie(Jd, Jl, Jr) = cell_jacobian_rusanov(Q_new, i);
 
                 // --- Assemble ---
                 for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) {
