@@ -155,65 +155,69 @@ Matrix3 computeSourceJacobian(const Vector3&) {
 }
 
 // =========== BOUNDARY CONDITIONS ===========
-
-Vector3 leftGhostCell(Vector3 Uc) {
-
-    double p_in = get_pA(Uc) / AREA;
-    double T_in = get_T(Uc);
-    double u_in = get_u(Uc);
-
-    double u_b = 2 * 1.0 - u_in;
-    double T_b = 2 * 350.0 - T_in;
-    double rho_b = p_in / (R_GAS * T_b);
-    double E_b = p_in / ((GAMMA - 1.0) * rho_b) + 0.5 * u_b * u_b;
-
-    return { 
-        rho_b * AREA, 
-        rho_b * u_b * AREA, 
-        rho_b * E_b * AREA 
-    };
-}
-
-Vector3 rightGhostCell(Vector3 Uc) {
-
-    double p_in = get_pA(Uc) / AREA;
-    double T_in = get_T(Uc);
-    double u_in = get_u(Uc);
-
-    double p_b = 2 * 10000.0 - p_in;
-    double rho_b = p_b / (R_GAS * T_in);
-    double E_b = p_b / ((GAMMA - 1.0) * rho_b) + 0.5 * u_in * u_in;
-
-    return { 
-        rho_b * AREA, 
-        rho_b * u_in * AREA, 
-        rho_b * E_b * AREA 
-    };
-}
-
 Vector3 leftFaceState(const Vector3& Uc) {
-    double p_b = get_pA(Uc) / AREA;   // zero-gradient
-    double rho_b = p_b / (R_GAS * 350.0);
-    double u_b = 1.0;
+    double u_b = 1.0;                       // Dirichlet
+    double T_b = 350.0;                     // Dirichlet
+    double p_b = get_pA(Uc) / AREA;         // Neumann
+    double rho_b = p_b / (R_GAS * T_b);     // Derived
+
     double E_b = p_b / ((GAMMA - 1.0) * rho_b) + 0.5 * u_b * u_b;
     return { rho_b * AREA, rho_b * u_b * AREA, rho_b * E_b * AREA };
 }
 
 Vector3 rightFaceState(const Vector3& Uc) {
-    double p_b = 10000.0;
-    double T_b = get_T(Uc);            // zero-gradient
-    double u_b = get_u(Uc);            // zero-gradient
-    double rho_b = p_b / (R_GAS * T_b);
+    double p_b = 10000.0;                   // Dirichlet
+    double T_b = get_T(Uc);                 // Neumann
+    double u_b = get_u(Uc);                 // Neumann
+    double rho_b = p_b / (R_GAS * T_b);     // Derived
     double E_b = p_b / ((GAMMA - 1.0) * rho_b) + 0.5 * u_b * u_b;
     return { rho_b * AREA, rho_b * u_b * AREA, rho_b * E_b * AREA };
 }
+
+// =========== MUSCL RECONSTRUCTION ===========
+Vector3 minmod_limit(const Vector3& a, const Vector3& b) {
+    Vector3 result;
+    for (int k = 0; k < 3; ++k) {
+        if (a(k) * b(k) <= 0.0)
+            result(k) = 0.0;
+        else if (std::abs(a(k)) < std::abs(b(k)))
+            result(k) = a(k);
+        else
+            result(k) = b(k);
+    }
+    return result; // = φ·(Ul - Ul2)
+}
+
+Vector3 vanAlbada_limit(const Vector3& a, const Vector3& b) {
+    Vector3 result;
+    for (int k = 0; k < 3; ++k) {
+        if (a(k) * b(k) <= 0.0)
+            result(k) = 0.0;
+        else
+            result(k) = (a(k) * b(k) * (a(k) + b(k))) / (a(k) * a(k) + b(k) * b(k));
+    }
+    return result;
+}
+
+// Ricostruisce stato sinistro e destro alla faccia i+1/2
+// Ul2 = U_{i-1}, Ul = U_i, Ur = U_{i+1}, Ur2 = U_{i+2}
+void muscl_reconstruct(const Vector3& Ul2, const Vector3& Ul,
+    const Vector3& Ur, const Vector3& Ur2,
+    Vector3& Ql_face, Vector3& Qr_face) {
+    Vector3 dL = minmod_limit(Ul - Ul2, Ur - Ul);
+    Vector3 dR = minmod_limit(Ur - Ul, Ur2 - Ur);
+    Ql_face = Ul + 0.5 * dL;
+    Qr_face = Ur - 0.5 * dR;
+}
+
+
 // =========== MAIN ===========
 
 int main() {
 
     VectorGlobal Q_n(3 * N), Q_new(3 * N);
     {
-        double p0 = 10000.0, T0 = 300.0, u0 = 0.0;
+        double p0 = 10000.0, T0 = 300.0, u0 = 1.0;
         double rho0 = p0 / (R_GAS * T0);
         double E0 = p0 / ((GAMMA - 1.0) * rho0) + 0.5 * u0 * u0;
         for (int i = 0; i < N; ++i) {
@@ -225,6 +229,42 @@ int main() {
 
     double t_final = 1.0, time = 0.0, dt = 1e-3;
     int step = 0;
+
+    // Residual for the upwind fluxes formulation
+    auto cell_residual_upwind = [&](const VectorGlobal& Qvec, int cell) -> Vector3 {
+
+        Vector3 Uc = Qvec.segment<3>(3 * cell);
+        Vector3 Ul = (cell > 0) ? Qvec.segment<3>(3 * (cell - 1)) : leftFaceState(Uc);
+        Vector3 Ur = (cell < N - 1) ? Qvec.segment<3>(3 * (cell + 1)) : rightFaceState(Uc);
+
+        // Upwind discretizazion
+        Vector3 F_left = computeFlux(Ul);
+        Vector3 F_right = (cell < N - 1) ? computeFlux(Uc) : computeFlux(Ur);
+
+        Vector3 R = (Uc - Q_n.segment<3>(3 * cell)) * (dx / dt)
+            + (F_right - F_left)
+            - computeSource(Uc) * dx;
+
+        return R;
+    };
+
+    // Residual for the linear fluxes formulation
+    auto cell_residual_linear = [&](const VectorGlobal& Qvec, int cell) -> Vector3 {
+
+        Vector3 Uc = Qvec.segment<3>(3 * cell);
+        Vector3 Ul = (cell > 0) ? Qvec.segment<3>(3 * (cell - 1)) : leftFaceState(Uc);
+        Vector3 Ur = (cell < N - 1) ? Qvec.segment<3>(3 * (cell + 1)) : rightFaceState(Uc);
+
+        // Upwind discretizazion
+        Vector3 F_left = (cell > 0) ? 0.5 * (computeFlux(Ul) + computeFlux(Uc)) : computeFlux(Ul);
+        Vector3 F_right = (cell < N - 1) ? 0.5 * (computeFlux(Uc) + computeFlux(Ur)) : computeFlux(Ur);
+
+        Vector3 R = (Uc - Q_n.segment<3>(3 * cell)) * (dx / dt)
+            + (F_right - F_left)
+            - computeSource(Uc) * dx;
+
+        return R;
+    };
 
     std::cout << "FVM Solver (Euler + conduction + viscosity) | N=" << N
         << " | DOFs=" << 3 * N << "\n";
@@ -255,132 +295,87 @@ int main() {
             for (int i = 0; i < N; ++i) {
 
                 Vector3 Uc = Q_new.segment<3>(3 * i);
-                double u_in = get_u(Uc);
-                double p_in = get_pA(Uc) / AREA;
-                double T_in = get_T(Uc);
+                Vector3 Ul = (i > 0) ? Q_new.segment<3>(3 * (i - 1)) : leftFaceState(Uc);
+                Vector3 Ur = (i < N - 1) ? Q_new.segment<3>(3 * (i + 1)) : rightFaceState(Uc);
 
-                Vector3 Ul = (i > 0) ? Q_new.segment<3>(3 * (i - 1)) : leftGhostCell(Uc);
-                Vector3 Ur = (i < N - 1) ? Q_new.segment<3>(3 * (i + 1)) : rightGhostCell(Uc);
+                Residual.segment<3>(3 * i) = cell_residual_upwind(Q_new, i);
 
-                // --- Convective fluxes (Rusanov) ---
-                Vector3 Fc = computeFlux(Uc), Fl = computeFlux(Ul), Fr = computeFlux(Ur);
-
-                double eps = 1e-8;
-
-                double sp_c = std::abs(u_in) + get_sound_speed(Uc);
-                double sp_l = std::abs(get_u(Ul)) + get_sound_speed(Ul);
-                double sp_r = std::abs(get_u(Ur)) + get_sound_speed(Ur);
-                
-                double nu_l = eps * std::max(sp_c, sp_l);
-                double nu_r = eps * std::max(sp_c, sp_r);
-
-                Vector3 F_right, F_left;
+                Matrix3 Jd = Matrix3::Zero();
+                Matrix3 Jl = Matrix3::Zero();
+                Matrix3 Jr = Matrix3::Zero();
 
                 if (i == 0) {
-                    F_left = computeFlux(leftFaceState(Uc));
-                }
-                else {
-                    F_left = 0.5 * (computeFlux(Ul) + computeFlux(Uc)) - 0.5 * nu_l * (Uc - Ul);
-                }
 
-                if (i == N - 1) {
-                    F_right = computeFlux(rightFaceState(Uc));
-                }
-                else {
-                    F_right = 0.5 * (computeFlux(Uc) + computeFlux(Ur)) - 0.5 * nu_r * (Ur - Uc);
-                }
-
-                // --- Cell residual ---
-                Vector3 R_cell = (Uc - Q_n.segment<3>(3 * i)) * (dx / dt)
-                    + (F_right - F_left)
-                    - computeSource(Uc) * dx;
-
-                // --- Conduction (energy row) ---
-                R_cell(2) += conductionResidual(Ul, Uc, Ur) * dx;
-
-                // --- Viscosity (momentum row + energy row) ---
-                R_cell(1) += viscMomResidual(Ul, Uc, Ur) * dx;
-                R_cell(2) += viscEnResidual(Ul, Uc, Ur) * dx;
-
-                Residual.segment<3>(3 * i) = R_cell;
-
-                // --- Jacobian blocks ---
-                Matrix3 Jd = Matrix3::Identity() * (dx / dt)
-                    + 0.5 * (nu_l + nu_r) * Matrix3::Identity()
-                    - computeSourceJacobian(Uc) * dx;
-
-                Matrix3 Jr = 0.5 * computeFluxJacobian(Ur) - 0.5 * nu_r * Matrix3::Identity();
-                Matrix3 Jl = -0.5 * computeFluxJacobian(Ul) + 0.5 * nu_l * Matrix3::Identity();
-
-                // Conduction → energy row (row 2)
-                Jd.row(2) += dx * dRcond_dQc(Uc);
-                Jr.row(2) += dx * dRcond_dQr(Ur);
-                Jl.row(2) += dx * dRcond_dQl(Ul);
-
-                // Viscosity momentum → row 1
-                Jd.row(1) += dx * dRviscMom_dQc(Uc);
-                Jr.row(1) += dx * dRviscMom_dQr(Ur);
-                Jl.row(1) += dx * dRviscMom_dQl(Ul);
-
-                // Viscosity energy → row 2
-                Jd.row(2) += dx * dRviscEn_dQc(Ul, Uc, Ur);
-                Jr.row(2) += dx * dRviscEn_dQr(Uc, Ur);
-                Jl.row(2) += dx * dRviscEn_dQl(Ul, Uc);
-
-                // ===== i=0 =====
-                if (i == 0) {
-                    double p_b = get_pA(Uc) / AREA;
-                    double rho_b = p_b / (R_GAS * 350.0);
+                    // Left boundary
+                    double u_c = get_u(Uc);
+                    double T_b = 350.0;
                     double u_b = 1.0;
-                    double E_b = R_GAS * 350.0 / (GAMMA - 1.0) + 0.5 * u_b * u_b;
-                    Vector3 Qbc = { rho_b * AREA, rho_b * u_b * AREA, rho_b * E_b * AREA };
+                    double E_b = R_GAS * T_b / (GAMMA - 1.0) + 0.5 * u_b * u_b;
+                    double coeff = (GAMMA - 1.0) / (R_GAS * T_b);
+                    double u2 = u_c * u_c;
 
-                    double c = AREA / (R_GAS * 350.0);
-                    Eigen::RowVector3d dp_dUc = { (GAMMA - 1.0) * 0.5 * u_in * u_in / AREA,
-                                                  -(GAMMA - 1.0) * u_in / AREA,
-                                                   (GAMMA - 1.0) / AREA };
-                    // dQbc/dUc: matrice 3x3 con righe = [1, u_b, E_b] * c * dp_dUc
-                    Matrix3 dQbc_dUc;
-                    dQbc_dUc.row(0) = c * dp_dUc;
-                    dQbc_dUc.row(1) = u_b * c * dp_dUc;
-                    dQbc_dUc.row(2) = E_b * c * dp_dUc;
+                    Matrix3 dFace_dUc;
 
-                    // Jd: termine temporale + Rusanov destro - dF_left/dUc
+                    dFace_dUc(0, 0) = coeff * 0.5 * u2;       
+                    dFace_dUc(0, 1) = coeff * (-u_c);       
+                    dFace_dUc(0, 2) = coeff;
+
+                    dFace_dUc(1, 0) = coeff * 0.5 * u2 * u_b; 
+                    dFace_dUc(1, 1) = coeff * (-u_c) * u_b; 
+                    dFace_dUc(1, 2) = coeff * u_b;
+
+                    dFace_dUc(2, 0) = coeff * 0.5 * u2 * E_b; 
+                    dFace_dUc(2, 1) = coeff * (-u_c) * E_b; 
+                    dFace_dUc(2, 2) = coeff * E_b;
+
                     Jd = Matrix3::Identity() * (dx / dt)
-                        + 0.5 * computeFluxJacobian(Uc) + 0.5 * nu_r * Matrix3::Identity()
-                        - computeFluxJacobian(Qbc) * dQbc_dUc;
-
-                    // Jr: solo interfaccia destra, identico all'originale
-                    Jr = 0.5 * computeFluxJacobian(Ur) - 0.5 * nu_r * Matrix3::Identity();
+                        + computeFluxJacobian(Uc)
+                        - computeFluxJacobian(leftFaceState(Uc)) * dFace_dUc
+                        - computeSourceJacobian(Uc) * dx;
                     Jl = Matrix3::Zero();
+                    Jr = Matrix3::Zero();
+
                 }
+                else if (i == N - 1) {
 
-                // ===== i=N-1 =====
-                if (i == N - 1) {
+                    // Right boundary
+                    double u_c = get_u(Uc);
+                    double T_c = get_T(Uc);
+                    double e_c = R_GAS * T_c / (GAMMA - 1.0);
                     double p_b = 10000.0;
-                    double T_b = get_T(Uc);
-                    double u_b = get_u(Uc);
-                    double rho_b = p_b / (R_GAS * T_b);
-                    double E_b = p_b / ((GAMMA - 1.0) * rho_b) + 0.5 * u_b * u_b;
-                    Vector3 Qbc = { rho_b * AREA, rho_b * u_b * AREA, rho_b * E_b * AREA };
+                    double alpha = p_b * AREA / (R_GAS * T_c);
+                    double beta = alpha / Uc(0);
+                    double delta = (GAMMA - 1.0) / (T_c * R_GAS);
+                    double k = 0.5 * u_c * u_c - e_c;
+                    double u2 = u_c * u_c;
 
-                    Eigen::RowVector3d dT_dUc = dTdQ(Uc);
-                    Eigen::RowVector3d du_dUc = dudQ(Uc);
-                    Eigen::RowVector3d drho_dUc = -p_b / (R_GAS * T_b * T_b) * dT_dUc;
-                    Eigen::RowVector3d dE_dUc = R_GAS / (GAMMA - 1.0) * dT_dUc + u_b * du_dUc;
+                    Matrix3 dFace_dUc;
 
-                    Matrix3 dQbc_dUc;
-                    dQbc_dUc.row(0) = AREA * drho_dUc;
-                    dQbc_dUc.row(1) = AREA * (u_b * drho_dUc + rho_b * du_dUc);
-                    dQbc_dUc.row(2) = AREA * (E_b * drho_dUc + rho_b * dE_dUc);
+                    dFace_dUc(0, 0) = beta * (-delta * k);
+                    dFace_dUc(0, 1) = beta * (delta * u_c);
+                    dFace_dUc(0, 2) = beta * (-delta);
 
-                    // Jd: termine temporale + dF_right/dUc - Rusanov sinistro
+                    dFace_dUc(1, 0) = beta * (-u_c - delta * u_c * k);
+                    dFace_dUc(1, 1) = beta * (1.0 + delta * u2);
+                    dFace_dUc(1, 2) = beta * (-delta * u_c);
+
+                    dFace_dUc(2, 0) = beta * (-u2 - delta * k * 0.5 * u2);
+                    dFace_dUc(2, 1) = beta * (u_c + delta * 0.5 * u2 * u_c);
+                    dFace_dUc(2, 2) = beta * (-delta * 0.5 * u2);
+
                     Jd = Matrix3::Identity() * (dx / dt)
-                        + computeFluxJacobian(Qbc) * dQbc_dUc
-                        - 0.5 * computeFluxJacobian(Uc) + 0.5 * nu_l * Matrix3::Identity();
+                        + computeFluxJacobian(rightFaceState(Uc)) * dFace_dUc
+                        - computeSourceJacobian(Uc) * dx;
+                    Jl = -computeFluxJacobian(Ul);
 
-                    // Jl: solo interfaccia sinistra, identico all'originale
-                    Jl = -0.5 * computeFluxJacobian(Ul) + 0.5 * nu_l * Matrix3::Identity();
+                }
+                else {
+
+                    // Internal cells
+                    Jd = Matrix3::Identity() * (dx / dt)
+                        + computeFluxJacobian(Uc)
+                        - computeSourceJacobian(Uc) * dx;
+                    Jl = -computeFluxJacobian(Ul);
                     Jr = Matrix3::Zero();
                 }
 
@@ -393,8 +388,7 @@ int main() {
             }
 
             double res_norm = Residual.norm();
-            // std::cout << "  iter=" << iter << " |R|=" << res_norm << "\n";
-
+            std::cout << "  iter=" << iter << " |R|=" << res_norm << "\n";
             if (res_norm < NEWTON_TOL) break;
 
             if (!factorized || iter % REFACTOR_EVERY == 0) {
@@ -430,6 +424,7 @@ int main() {
 
         Q_n = Q_new;
         time += dt;
+        std::cout << time << "\n";
         step++;
 
     }
