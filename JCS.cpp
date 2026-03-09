@@ -290,6 +290,14 @@ int main() {
         Vector3 R = (Uc - Q_n.segment<3>(3 * cell)) * (dx / dt)
             + (F_right - F_left)
             - computeSource(Uc) * dx;
+
+        // --- Conduction (energy row) ---
+        R(2) += conductionResidual(Ul, Uc, Ur) * dx;
+
+        // --- Viscosity (momentum row + energy row) ---
+        R(1) += viscMomResidual(Ul, Uc, Ur) * dx;
+        R(2) += viscEnResidual(Ul, Uc, Ur) * dx;
+
         return R;
         };
 
@@ -503,6 +511,21 @@ int main() {
             Jl = -0.5 * computeFluxJacobian(Ul) - 0.5 * nu_l * Matrix3::Identity();
             Jr = 0.5 * computeFluxJacobian(Ur) - 0.5 * nu_r * Matrix3::Identity();
         }
+
+        // Conduction → energy row (row 2)
+        Jd.row(2) += dx * dRcond_dQc(Uc);
+        Jr.row(2) += dx * dRcond_dQr(Ur);
+        Jl.row(2) += dx * dRcond_dQl(Ul);
+
+        // Viscosity momentum → row 1
+        Jd.row(1) += dx * dRviscMom_dQc(Uc);
+        Jr.row(1) += dx * dRviscMom_dQr(Ur);
+        Jl.row(1) += dx * dRviscMom_dQl(Ul);
+
+        // Viscosity energy → row 2
+        Jd.row(2) += dx * dRviscEn_dQc(Ul, Uc, Ur);
+        Jr.row(2) += dx * dRviscEn_dQr(Uc, Ur);
+        Jl.row(2) += dx * dRviscEn_dQl(Ul, Uc);
 
         return { Jd, Jl, Jr };
         };
