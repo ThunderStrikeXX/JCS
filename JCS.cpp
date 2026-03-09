@@ -230,7 +230,7 @@ int main() {
     double t_final = 1.0, time = 0.0, dt = 1e-3;
     int step = 0;
 
-    double eps = 1e-1;
+    double eps = 1;
 
     // Residual for the upwind fluxes formulation
     auto cell_residual_upwind = [&](const VectorGlobal& Qvec, int cell) -> Vector3 {
