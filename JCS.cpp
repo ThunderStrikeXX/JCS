@@ -247,6 +247,13 @@ int main() {
             + (F_right - F_left)
             - computeSource(Uc) * dx;
 
+        // --- Conduction (energy row) ---
+        R(2) += conductionResidual(Ul, Uc, Ur) * dx;
+
+        // --- Viscosity (momentum row + energy row) ---
+        R(1) += viscMomResidual(Ul, Uc, Ur) * dx;
+        R(2) += viscEnResidual(Ul, Uc, Ur) * dx;
+
         return R;
     };
 
@@ -264,6 +271,13 @@ int main() {
         Vector3 R = (Uc - Q_n.segment<3>(3 * cell)) * (dx / dt)
             + (F_right - F_left)
             - computeSource(Uc) * dx;
+
+        // --- Conduction (energy row) ---
+        R(2) += conductionResidual(Ul, Uc, Ur) * dx;
+
+        // --- Viscosity (momentum row + energy row) ---
+        R(1) += viscMomResidual(Ul, Uc, Ur) * dx;
+        R(2) += viscEnResidual(Ul, Uc, Ur) * dx;
 
         return R;
     };
@@ -330,6 +344,19 @@ int main() {
                 - computeSourceJacobian(Uc) * dx;
             Jl = Matrix3::Zero();
 
+            // Diffusivi: Ul dipende da Uc → chain rule su Jd
+            Jd.row(2) += dx * dRcond_dQc(Uc);
+            Jd.row(2) += dx * dRcond_dQl(Ul) * dFace_dUc;
+            Jr.row(2) += dx * dRcond_dQr(Ur);
+
+            Jd.row(1) += dx * dRviscMom_dQc(Uc);
+            Jd.row(1) += dx * dRviscMom_dQl(Ul) * dFace_dUc;
+            Jr.row(1) += dx * dRviscMom_dQr(Ur);
+
+            Jd.row(2) += dx * dRviscEn_dQc(Ul, Uc, Ur);
+            Jd.row(2) += dx * dRviscEn_dQl(Ul, Uc) * dFace_dUc;
+            Jr.row(2) += dx * dRviscEn_dQr(Uc, Ur);
+
         }
         else if (cell == N - 1) {
             double u_c = get_u(Uc);
@@ -358,6 +385,19 @@ int main() {
                 - computeSourceJacobian(Uc) * dx;
             Jl = -computeFluxJacobian(Ul);
 
+            // Diffusivi: Ur dipende da Uc → chain rule su Jd
+            Jd.row(2) += dx * dRcond_dQc(Uc);
+            Jd.row(2) += dx * dRcond_dQr(Ur) * dFace_dUc;
+            Jl.row(2) += dx * dRcond_dQl(Ul);
+
+            Jd.row(1) += dx * dRviscMom_dQc(Uc);
+            Jd.row(1) += dx * dRviscMom_dQr(Ur) * dFace_dUc;
+            Jl.row(1) += dx * dRviscMom_dQl(Ul);
+
+            Jd.row(2) += dx * dRviscEn_dQc(Ul, Uc, Ur);
+            Jd.row(2) += dx * dRviscEn_dQr(Uc, Ur) * dFace_dUc;
+            Jl.row(2) += dx * dRviscEn_dQl(Ul, Uc);
+
         }
         else {
             Jd = Matrix3::Identity() * (dx / dt)
@@ -365,6 +405,21 @@ int main() {
                 - computeSourceJacobian(Uc) * dx;
             Jl = -computeFluxJacobian(Ul);
         }
+
+        // Conduction → energy row (row 2)
+        Jd.row(2) += dx * dRcond_dQc(Uc);
+        Jr.row(2) += dx * dRcond_dQr(Ur);
+        Jl.row(2) += dx * dRcond_dQl(Ul);
+
+        // Viscosity momentum → row 1
+        Jd.row(1) += dx * dRviscMom_dQc(Uc);
+        Jr.row(1) += dx * dRviscMom_dQr(Ur);
+        Jl.row(1) += dx * dRviscMom_dQl(Ul);
+
+        // Viscosity energy → row 2
+        Jd.row(2) += dx * dRviscEn_dQc(Ul, Uc, Ur);
+        Jr.row(2) += dx * dRviscEn_dQr(Uc, Ur);
+        Jl.row(2) += dx * dRviscEn_dQl(Ul, Uc);
 
         return { Jd, Jl, Jr };
         };
@@ -375,9 +430,9 @@ int main() {
         Vector3 Uc = Qvec.segment<3>(3 * cell);
         Vector3 Ul = (cell > 0) ? Qvec.segment<3>(3 * (cell - 1)) : leftFaceState(Uc);
         Vector3 Ur = (cell < N - 1) ? Qvec.segment<3>(3 * (cell + 1)) : rightFaceState(Uc);
-
         Matrix3 Jd, Jl, Jr;
         Jr = Matrix3::Zero();
+        Matrix3 dFace_dUc;
 
         if (cell == 0) {
             double u_c = get_u(Uc);
@@ -386,8 +441,6 @@ int main() {
             double E_b = R_GAS * T_b / (GAMMA - 1.0) + 0.5 * u_b * u_b;
             double coeff = (GAMMA - 1.0) / (R_GAS * T_b);
             double u2 = u_c * u_c;
-
-            Matrix3 dFace_dUc;
             dFace_dUc(0, 0) = coeff * 0.5 * u2;       dFace_dUc(0, 1) = coeff * (-u_c);       dFace_dUc(0, 2) = coeff;
             dFace_dUc(1, 0) = coeff * 0.5 * u2 * u_b; dFace_dUc(1, 1) = coeff * (-u_c) * u_b; dFace_dUc(1, 2) = coeff * u_b;
             dFace_dUc(2, 0) = coeff * 0.5 * u2 * E_b; dFace_dUc(2, 1) = coeff * (-u_c) * E_b; dFace_dUc(2, 2) = coeff * E_b;
@@ -398,6 +451,19 @@ int main() {
                 - computeSourceJacobian(Uc) * dx;
             Jl = Matrix3::Zero();
             Jr = 0.5 * computeFluxJacobian(Ur);
+
+            // Diffusivi: Ul dipende da Uc → chain rule su Jd
+            Jd.row(2) += dx * dRcond_dQc(Uc);
+            Jd.row(2) += dx * dRcond_dQl(Ul) * dFace_dUc;
+            Jr.row(2) += dx * dRcond_dQr(Ur);
+
+            Jd.row(1) += dx * dRviscMom_dQc(Uc);
+            Jd.row(1) += dx * dRviscMom_dQl(Ul) * dFace_dUc;
+            Jr.row(1) += dx * dRviscMom_dQr(Ur);
+
+            Jd.row(2) += dx * dRviscEn_dQc(Ul, Uc, Ur);
+            Jd.row(2) += dx * dRviscEn_dQl(Ul, Uc) * dFace_dUc;
+            Jr.row(2) += dx * dRviscEn_dQr(Uc, Ur);
 
         }
         else if (cell == N - 1) {
@@ -410,8 +476,6 @@ int main() {
             double delta = (GAMMA - 1.0) / (T_c * R_GAS);
             double k = 0.5 * u_c * u_c - e_c;
             double u2 = u_c * u_c;
-
-            Matrix3 dFace_dUc;
             dFace_dUc(0, 0) = beta * (-delta * k);
             dFace_dUc(0, 1) = beta * (delta * u_c);
             dFace_dUc(0, 2) = beta * (-delta);
@@ -429,16 +493,42 @@ int main() {
             Jl = -0.5 * computeFluxJacobian(Ul);
             Jr = Matrix3::Zero();
 
+            // Diffusivi: Ur dipende da Uc → chain rule su Jd
+            Jd.row(2) += dx * dRcond_dQc(Uc);
+            Jd.row(2) += dx * dRcond_dQr(Ur) * dFace_dUc;
+            Jl.row(2) += dx * dRcond_dQl(Ul);
+
+            Jd.row(1) += dx * dRviscMom_dQc(Uc);
+            Jd.row(1) += dx * dRviscMom_dQr(Ur) * dFace_dUc;
+            Jl.row(1) += dx * dRviscMom_dQl(Ul);
+
+            Jd.row(2) += dx * dRviscEn_dQc(Ul, Uc, Ur);
+            Jd.row(2) += dx * dRviscEn_dQr(Uc, Ur) * dFace_dUc;
+            Jl.row(2) += dx * dRviscEn_dQl(Ul, Uc);
+
         }
         else {
             Jd = Matrix3::Identity() * (dx / dt)
                 - computeSourceJacobian(Uc) * dx;
             Jl = -0.5 * computeFluxJacobian(Ul);
             Jr = 0.5 * computeFluxJacobian(Ur);
+
+            // Diffusivi: celle interne, normale
+            Jd.row(2) += dx * dRcond_dQc(Uc);
+            Jr.row(2) += dx * dRcond_dQr(Ur);
+            Jl.row(2) += dx * dRcond_dQl(Ul);
+
+            Jd.row(1) += dx * dRviscMom_dQc(Uc);
+            Jr.row(1) += dx * dRviscMom_dQr(Ur);
+            Jl.row(1) += dx * dRviscMom_dQl(Ul);
+
+            Jd.row(2) += dx * dRviscEn_dQc(Ul, Uc, Ur);
+            Jr.row(2) += dx * dRviscEn_dQr(Uc, Ur);
+            Jl.row(2) += dx * dRviscEn_dQl(Ul, Uc);
         }
 
         return { Jd, Jl, Jr };
-        };
+    };
 
     // Jacobian for the linear fluxes formulation with Rusanov correction
     auto cell_jacobian_rusanov = [&](const VectorGlobal& Qvec, int cell)
@@ -474,6 +564,19 @@ int main() {
             Jl = Matrix3::Zero();
             Jr = 0.5 * computeFluxJacobian(Ur) - 0.5 * nu_r * Matrix3::Identity();
 
+            // Diffusivi: Ul dipende da Uc → chain rule su Jd
+            Jd.row(2) += dx * dRcond_dQc(Uc);
+            Jd.row(2) += dx * dRcond_dQl(Ul) * dFace_dUc;
+            Jr.row(2) += dx * dRcond_dQr(Ur);
+
+            Jd.row(1) += dx * dRviscMom_dQc(Uc);
+            Jd.row(1) += dx * dRviscMom_dQl(Ul) * dFace_dUc;
+            Jr.row(1) += dx * dRviscMom_dQr(Ur);
+
+            Jd.row(2) += dx * dRviscEn_dQc(Ul, Uc, Ur);
+            Jd.row(2) += dx * dRviscEn_dQl(Ul, Uc) * dFace_dUc;
+            Jr.row(2) += dx * dRviscEn_dQr(Uc, Ur);
+
         }
         else if (cell == N - 1) {
             double u_c = get_u(Uc);
@@ -502,6 +605,19 @@ int main() {
                 - computeSourceJacobian(Uc) * dx;
             Jl = -0.5 * computeFluxJacobian(Ul) - 0.5 * nu_l * Matrix3::Identity();
             Jr = Matrix3::Zero();
+
+            // Diffusivi: Ur dipende da Uc → chain rule su Jd
+            Jd.row(2) += dx * dRcond_dQc(Uc);
+            Jd.row(2) += dx * dRcond_dQr(Ur) * dFace_dUc;
+            Jl.row(2) += dx * dRcond_dQl(Ul);
+
+            Jd.row(1) += dx * dRviscMom_dQc(Uc);
+            Jd.row(1) += dx * dRviscMom_dQr(Ur) * dFace_dUc;
+            Jl.row(1) += dx * dRviscMom_dQl(Ul);
+
+            Jd.row(2) += dx * dRviscEn_dQc(Ul, Uc, Ur);
+            Jd.row(2) += dx * dRviscEn_dQr(Uc, Ur) * dFace_dUc;
+            Jl.row(2) += dx * dRviscEn_dQl(Ul, Uc);
 
         }
         else {
@@ -562,13 +678,13 @@ int main() {
                 Vector3 Ul = (i > 0) ? Q_new.segment<3>(3 * (i - 1)) : leftFaceState(Uc);
                 Vector3 Ur = (i < N - 1) ? Q_new.segment<3>(3 * (i + 1)) : rightFaceState(Uc);
 
-                Residual.segment<3>(3 * i) = cell_residual_rusanov(Q_new, i);
+                Residual.segment<3>(3 * i) = cell_residual_linear(Q_new, i);
 
                 Matrix3 Jd = Matrix3::Zero();
                 Matrix3 Jl = Matrix3::Zero();
                 Matrix3 Jr = Matrix3::Zero();
 
-                std::tie(Jd, Jl, Jr) = cell_jacobian_rusanov(Q_new, i);
+                std::tie(Jd, Jl, Jr) = cell_jacobian_linear(Q_new, i);
 
                 // --- Assemble ---
                 for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) {
