@@ -230,6 +230,8 @@ int main() {
     double t_final = 1.0, time = 0.0, dt = 1e-3;
     int step = 0;
 
+    double eps = 1e-1;
+
     // Residual for the upwind fluxes formulation
     auto cell_residual_upwind = [&](const VectorGlobal& Qvec, int cell) -> Vector3 {
 
@@ -266,6 +268,245 @@ int main() {
         return R;
     };
 
+    // Residual for the linear fluxes formulation with Rusanov correction
+    auto cell_residual_rusanov = [&](const VectorGlobal& Qvec, int cell) -> Vector3 {
+        Vector3 Uc = Qvec.segment<3>(3 * cell);
+        Vector3 Ul = (cell > 0) ? Qvec.segment<3>(3 * (cell - 1)) : leftFaceState(Uc);
+        Vector3 Ur = (cell < N - 1) ? Qvec.segment<3>(3 * (cell + 1)) : rightFaceState(Uc);
+
+        double sp_c = std::abs(get_u(Uc)) + get_sound_speed(Uc);
+        double sp_l = std::abs(get_u(Ul)) + get_sound_speed(Ul);
+        double sp_r = std::abs(get_u(Ur)) + get_sound_speed(Ur);
+        double nu_l = eps * std::max(sp_c, sp_l);
+        double nu_r = eps * std::max(sp_c, sp_r);
+
+        Vector3 F_left = (cell > 0)
+            ? 0.5 * (computeFlux(Ul) + computeFlux(Uc)) - 0.5 * nu_l * (Uc - Ul)
+            : computeFlux(Ul);
+        Vector3 F_right = (cell < N - 1)
+            ? 0.5 * (computeFlux(Uc) + computeFlux(Ur)) - 0.5 * nu_r * (Ur - Uc)
+            : computeFlux(Ur);
+
+        Vector3 R = (Uc - Q_n.segment<3>(3 * cell)) * (dx / dt)
+            + (F_right - F_left)
+            - computeSource(Uc) * dx;
+        return R;
+        };
+
+    // Jacobian for the upwind fluxes formulation
+    auto cell_jacobian_upwind = [&](const VectorGlobal& Qvec, int cell)
+        -> std::tuple<Matrix3, Matrix3, Matrix3> {
+        Vector3 Uc = Qvec.segment<3>(3 * cell);
+        Vector3 Ul = (cell > 0) ? Qvec.segment<3>(3 * (cell - 1)) : leftFaceState(Uc);
+        Vector3 Ur = (cell < N - 1) ? Qvec.segment<3>(3 * (cell + 1)) : rightFaceState(Uc);
+
+        Matrix3 Jd, Jl, Jr;
+        Jr = Matrix3::Zero();
+
+        if (cell == 0) {
+            double u_c = get_u(Uc);
+            double T_b = 350.0;
+            double u_b = 1.0;
+            double E_b = R_GAS * T_b / (GAMMA - 1.0) + 0.5 * u_b * u_b;
+            double coeff = (GAMMA - 1.0) / (R_GAS * T_b);
+            double u2 = u_c * u_c;
+
+            Matrix3 dFace_dUc;
+            dFace_dUc(0, 0) = coeff * 0.5 * u2;       dFace_dUc(0, 1) = coeff * (-u_c);       dFace_dUc(0, 2) = coeff;
+            dFace_dUc(1, 0) = coeff * 0.5 * u2 * u_b; dFace_dUc(1, 1) = coeff * (-u_c) * u_b; dFace_dUc(1, 2) = coeff * u_b;
+            dFace_dUc(2, 0) = coeff * 0.5 * u2 * E_b; dFace_dUc(2, 1) = coeff * (-u_c) * E_b; dFace_dUc(2, 2) = coeff * E_b;
+
+            Jd = Matrix3::Identity() * (dx / dt)
+                + computeFluxJacobian(Uc)
+                - computeFluxJacobian(leftFaceState(Uc)) * dFace_dUc
+                - computeSourceJacobian(Uc) * dx;
+            Jl = Matrix3::Zero();
+
+        }
+        else if (cell == N - 1) {
+            double u_c = get_u(Uc);
+            double T_c = get_T(Uc);
+            double e_c = R_GAS * T_c / (GAMMA - 1.0);
+            double p_b = 10000.0;
+            double alpha = p_b * AREA / (R_GAS * T_c);
+            double beta = alpha / Uc(0);
+            double delta = (GAMMA - 1.0) / (T_c * R_GAS);
+            double k = 0.5 * u_c * u_c - e_c;
+            double u2 = u_c * u_c;
+
+            Matrix3 dFace_dUc;
+            dFace_dUc(0, 0) = beta * (-delta * k);
+            dFace_dUc(0, 1) = beta * (delta * u_c);
+            dFace_dUc(0, 2) = beta * (-delta);
+            dFace_dUc(1, 0) = beta * (-u_c - delta * u_c * k);
+            dFace_dUc(1, 1) = beta * (1.0 + delta * u2);
+            dFace_dUc(1, 2) = beta * (-delta * u_c);
+            dFace_dUc(2, 0) = beta * (-u2 - delta * k * 0.5 * u2);
+            dFace_dUc(2, 1) = beta * (u_c + delta * 0.5 * u2 * u_c);
+            dFace_dUc(2, 2) = beta * (-delta * 0.5 * u2);
+
+            Jd = Matrix3::Identity() * (dx / dt)
+                + computeFluxJacobian(rightFaceState(Uc)) * dFace_dUc
+                - computeSourceJacobian(Uc) * dx;
+            Jl = -computeFluxJacobian(Ul);
+
+        }
+        else {
+            Jd = Matrix3::Identity() * (dx / dt)
+                + computeFluxJacobian(Uc)
+                - computeSourceJacobian(Uc) * dx;
+            Jl = -computeFluxJacobian(Ul);
+        }
+
+        return { Jd, Jl, Jr };
+        };
+
+    // Jacobian for the linear fluxes formulation
+    auto cell_jacobian_linear = [&](const VectorGlobal& Qvec, int cell)
+        -> std::tuple<Matrix3, Matrix3, Matrix3> {
+        Vector3 Uc = Qvec.segment<3>(3 * cell);
+        Vector3 Ul = (cell > 0) ? Qvec.segment<3>(3 * (cell - 1)) : leftFaceState(Uc);
+        Vector3 Ur = (cell < N - 1) ? Qvec.segment<3>(3 * (cell + 1)) : rightFaceState(Uc);
+
+        Matrix3 Jd, Jl, Jr;
+        Jr = Matrix3::Zero();
+
+        if (cell == 0) {
+            double u_c = get_u(Uc);
+            double T_b = 350.0;
+            double u_b = 1.0;
+            double E_b = R_GAS * T_b / (GAMMA - 1.0) + 0.5 * u_b * u_b;
+            double coeff = (GAMMA - 1.0) / (R_GAS * T_b);
+            double u2 = u_c * u_c;
+
+            Matrix3 dFace_dUc;
+            dFace_dUc(0, 0) = coeff * 0.5 * u2;       dFace_dUc(0, 1) = coeff * (-u_c);       dFace_dUc(0, 2) = coeff;
+            dFace_dUc(1, 0) = coeff * 0.5 * u2 * u_b; dFace_dUc(1, 1) = coeff * (-u_c) * u_b; dFace_dUc(1, 2) = coeff * u_b;
+            dFace_dUc(2, 0) = coeff * 0.5 * u2 * E_b; dFace_dUc(2, 1) = coeff * (-u_c) * E_b; dFace_dUc(2, 2) = coeff * E_b;
+
+            Jd = Matrix3::Identity() * (dx / dt)
+                + 0.5 * computeFluxJacobian(Uc)
+                - computeFluxJacobian(leftFaceState(Uc)) * dFace_dUc
+                - computeSourceJacobian(Uc) * dx;
+            Jl = Matrix3::Zero();
+            Jr = 0.5 * computeFluxJacobian(Ur);
+
+        }
+        else if (cell == N - 1) {
+            double u_c = get_u(Uc);
+            double T_c = get_T(Uc);
+            double e_c = R_GAS * T_c / (GAMMA - 1.0);
+            double p_b = 10000.0;
+            double alpha = p_b * AREA / (R_GAS * T_c);
+            double beta = alpha / Uc(0);
+            double delta = (GAMMA - 1.0) / (T_c * R_GAS);
+            double k = 0.5 * u_c * u_c - e_c;
+            double u2 = u_c * u_c;
+
+            Matrix3 dFace_dUc;
+            dFace_dUc(0, 0) = beta * (-delta * k);
+            dFace_dUc(0, 1) = beta * (delta * u_c);
+            dFace_dUc(0, 2) = beta * (-delta);
+            dFace_dUc(1, 0) = beta * (-u_c - delta * u_c * k);
+            dFace_dUc(1, 1) = beta * (1.0 + delta * u2);
+            dFace_dUc(1, 2) = beta * (-delta * u_c);
+            dFace_dUc(2, 0) = beta * (-u2 - delta * k * 0.5 * u2);
+            dFace_dUc(2, 1) = beta * (u_c + delta * 0.5 * u2 * u_c);
+            dFace_dUc(2, 2) = beta * (-delta * 0.5 * u2);
+
+            Jd = Matrix3::Identity() * (dx / dt)
+                - 0.5 * computeFluxJacobian(Uc)
+                + computeFluxJacobian(rightFaceState(Uc)) * dFace_dUc
+                - computeSourceJacobian(Uc) * dx;
+            Jl = -0.5 * computeFluxJacobian(Ul);
+            Jr = Matrix3::Zero();
+
+        }
+        else {
+            Jd = Matrix3::Identity() * (dx / dt)
+                - computeSourceJacobian(Uc) * dx;
+            Jl = -0.5 * computeFluxJacobian(Ul);
+            Jr = 0.5 * computeFluxJacobian(Ur);
+        }
+
+        return { Jd, Jl, Jr };
+        };
+
+    // Jacobian for the linear fluxes formulation with Rusanov correction
+    auto cell_jacobian_rusanov = [&](const VectorGlobal& Qvec, int cell)
+        -> std::tuple<Matrix3, Matrix3, Matrix3> {
+        Vector3 Uc = Qvec.segment<3>(3 * cell);
+        Vector3 Ul = (cell > 0) ? Qvec.segment<3>(3 * (cell - 1)) : leftFaceState(Uc);
+        Vector3 Ur = (cell < N - 1) ? Qvec.segment<3>(3 * (cell + 1)) : rightFaceState(Uc);
+
+        double sp_c = std::abs(get_u(Uc)) + get_sound_speed(Uc);
+        double sp_l = std::abs(get_u(Ul)) + get_sound_speed(Ul);
+        double sp_r = std::abs(get_u(Ur)) + get_sound_speed(Ur);
+        double nu_l = eps * std::max(sp_c, sp_l);
+        double nu_r = eps * std::max(sp_c, sp_r);
+
+        Matrix3 Jd, Jl, Jr;
+
+        if (cell == 0) {
+            double u_c = get_u(Uc);
+            double T_b = 350.0;
+            double u_b = 1.0;
+            double E_b = R_GAS * T_b / (GAMMA - 1.0) + 0.5 * u_b * u_b;
+            double coeff = (GAMMA - 1.0) / (R_GAS * T_b);
+            double u2 = u_c * u_c;
+            Matrix3 dFace_dUc;
+            dFace_dUc(0, 0) = coeff * 0.5 * u2;       dFace_dUc(0, 1) = coeff * (-u_c);       dFace_dUc(0, 2) = coeff;
+            dFace_dUc(1, 0) = coeff * 0.5 * u2 * u_b; dFace_dUc(1, 1) = coeff * (-u_c) * u_b; dFace_dUc(1, 2) = coeff * u_b;
+            dFace_dUc(2, 0) = coeff * 0.5 * u2 * E_b; dFace_dUc(2, 1) = coeff * (-u_c) * E_b; dFace_dUc(2, 2) = coeff * E_b;
+
+            Jd = Matrix3::Identity() * (dx / dt)
+                + 0.5 * computeFluxJacobian(Uc) + 0.5 * nu_r * Matrix3::Identity()
+                - computeFluxJacobian(leftFaceState(Uc)) * dFace_dUc
+                - computeSourceJacobian(Uc) * dx;
+            Jl = Matrix3::Zero();
+            Jr = 0.5 * computeFluxJacobian(Ur) - 0.5 * nu_r * Matrix3::Identity();
+
+        }
+        else if (cell == N - 1) {
+            double u_c = get_u(Uc);
+            double T_c = get_T(Uc);
+            double e_c = R_GAS * T_c / (GAMMA - 1.0);
+            double p_b = 10000.0;
+            double alpha = p_b * AREA / (R_GAS * T_c);
+            double beta = alpha / Uc(0);
+            double delta = (GAMMA - 1.0) / (T_c * R_GAS);
+            double k = 0.5 * u_c * u_c - e_c;
+            double u2 = u_c * u_c;
+            Matrix3 dFace_dUc;
+            dFace_dUc(0, 0) = beta * (-delta * k);
+            dFace_dUc(0, 1) = beta * (delta * u_c);
+            dFace_dUc(0, 2) = beta * (-delta);
+            dFace_dUc(1, 0) = beta * (-u_c - delta * u_c * k);
+            dFace_dUc(1, 1) = beta * (1.0 + delta * u2);
+            dFace_dUc(1, 2) = beta * (-delta * u_c);
+            dFace_dUc(2, 0) = beta * (-u2 - delta * k * 0.5 * u2);
+            dFace_dUc(2, 1) = beta * (u_c + delta * 0.5 * u2 * u_c);
+            dFace_dUc(2, 2) = beta * (-delta * 0.5 * u2);
+
+            Jd = Matrix3::Identity() * (dx / dt)
+                - 0.5 * computeFluxJacobian(Uc) + 0.5 * nu_l * Matrix3::Identity()
+                + computeFluxJacobian(rightFaceState(Uc)) * dFace_dUc
+                - computeSourceJacobian(Uc) * dx;
+            Jl = -0.5 * computeFluxJacobian(Ul) - 0.5 * nu_l * Matrix3::Identity();
+            Jr = Matrix3::Zero();
+
+        }
+        else {
+            Jd = Matrix3::Identity() * (dx / dt)
+                + 0.5 * (nu_r + nu_l) * Matrix3::Identity()
+                - computeSourceJacobian(Uc) * dx;
+            Jl = -0.5 * computeFluxJacobian(Ul) - 0.5 * nu_l * Matrix3::Identity();
+            Jr = 0.5 * computeFluxJacobian(Ur) - 0.5 * nu_r * Matrix3::Identity();
+        }
+
+        return { Jd, Jl, Jr };
+        };
+
     std::cout << "FVM Solver (Euler + conduction + viscosity) | N=" << N
         << " | DOFs=" << 3 * N << "\n";
 
@@ -298,86 +539,13 @@ int main() {
                 Vector3 Ul = (i > 0) ? Q_new.segment<3>(3 * (i - 1)) : leftFaceState(Uc);
                 Vector3 Ur = (i < N - 1) ? Q_new.segment<3>(3 * (i + 1)) : rightFaceState(Uc);
 
-                Residual.segment<3>(3 * i) = cell_residual_upwind(Q_new, i);
+                Residual.segment<3>(3 * i) = cell_residual_rusanov(Q_new, i);
 
                 Matrix3 Jd = Matrix3::Zero();
                 Matrix3 Jl = Matrix3::Zero();
                 Matrix3 Jr = Matrix3::Zero();
 
-                if (i == 0) {
-
-                    // Left boundary
-                    double u_c = get_u(Uc);
-                    double T_b = 350.0;
-                    double u_b = 1.0;
-                    double E_b = R_GAS * T_b / (GAMMA - 1.0) + 0.5 * u_b * u_b;
-                    double coeff = (GAMMA - 1.0) / (R_GAS * T_b);
-                    double u2 = u_c * u_c;
-
-                    Matrix3 dFace_dUc;
-
-                    dFace_dUc(0, 0) = coeff * 0.5 * u2;       
-                    dFace_dUc(0, 1) = coeff * (-u_c);       
-                    dFace_dUc(0, 2) = coeff;
-
-                    dFace_dUc(1, 0) = coeff * 0.5 * u2 * u_b; 
-                    dFace_dUc(1, 1) = coeff * (-u_c) * u_b; 
-                    dFace_dUc(1, 2) = coeff * u_b;
-
-                    dFace_dUc(2, 0) = coeff * 0.5 * u2 * E_b; 
-                    dFace_dUc(2, 1) = coeff * (-u_c) * E_b; 
-                    dFace_dUc(2, 2) = coeff * E_b;
-
-                    Jd = Matrix3::Identity() * (dx / dt)
-                        + computeFluxJacobian(Uc)
-                        - computeFluxJacobian(leftFaceState(Uc)) * dFace_dUc
-                        - computeSourceJacobian(Uc) * dx;
-                    Jl = Matrix3::Zero();
-                    Jr = Matrix3::Zero();
-
-                }
-                else if (i == N - 1) {
-
-                    // Right boundary
-                    double u_c = get_u(Uc);
-                    double T_c = get_T(Uc);
-                    double e_c = R_GAS * T_c / (GAMMA - 1.0);
-                    double p_b = 10000.0;
-                    double alpha = p_b * AREA / (R_GAS * T_c);
-                    double beta = alpha / Uc(0);
-                    double delta = (GAMMA - 1.0) / (T_c * R_GAS);
-                    double k = 0.5 * u_c * u_c - e_c;
-                    double u2 = u_c * u_c;
-
-                    Matrix3 dFace_dUc;
-
-                    dFace_dUc(0, 0) = beta * (-delta * k);
-                    dFace_dUc(0, 1) = beta * (delta * u_c);
-                    dFace_dUc(0, 2) = beta * (-delta);
-
-                    dFace_dUc(1, 0) = beta * (-u_c - delta * u_c * k);
-                    dFace_dUc(1, 1) = beta * (1.0 + delta * u2);
-                    dFace_dUc(1, 2) = beta * (-delta * u_c);
-
-                    dFace_dUc(2, 0) = beta * (-u2 - delta * k * 0.5 * u2);
-                    dFace_dUc(2, 1) = beta * (u_c + delta * 0.5 * u2 * u_c);
-                    dFace_dUc(2, 2) = beta * (-delta * 0.5 * u2);
-
-                    Jd = Matrix3::Identity() * (dx / dt)
-                        + computeFluxJacobian(rightFaceState(Uc)) * dFace_dUc
-                        - computeSourceJacobian(Uc) * dx;
-                    Jl = -computeFluxJacobian(Ul);
-
-                }
-                else {
-
-                    // Internal cells
-                    Jd = Matrix3::Identity() * (dx / dt)
-                        + computeFluxJacobian(Uc)
-                        - computeSourceJacobian(Uc) * dx;
-                    Jl = -computeFluxJacobian(Ul);
-                    Jr = Matrix3::Zero();
-                }
+                std::tie(Jd, Jl, Jr) = cell_jacobian_rusanov(Q_new, i);
 
                 // --- Assemble ---
                 for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) {
@@ -398,12 +566,15 @@ int main() {
                 lu_solver.compute(J);
                 if (lu_solver.info() != Eigen::Success) {
                     std::cerr << "SparseLU failed at t=" << time << " iter=" << iter << "\n";
+                    system("pause");
                     return -1;
                 }
                 factorized = true;
             }
 
-            Q_new += lu_solver.solve(-Residual);
+            double alpha = 1.0;
+
+            Q_new += alpha * lu_solver.solve(-Residual);
         }
 
         // --- Output ---
