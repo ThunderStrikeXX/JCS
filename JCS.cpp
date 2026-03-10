@@ -10,7 +10,7 @@
 #include <iomanip> 
 
 // =========== PARAMETERS ===========
-const int    N = 100;               // Number of spatial cells [-]
+const int    N = 400;               // Number of spatial cells [-]
 const double L = 1.0;               // Domain length [m]
 const double dx = L / N;            // Cell width [m]
 const double GAMMA = 1.57;          // Gamma [-]
@@ -974,7 +974,7 @@ int main() {
             }
 
             double res_norm = Residual.norm();
-            std::cout << "  iter=" << iter << " |R|=" << res_norm << "\n";
+            // std::cout << "  iter=" << iter << " |R|=" << res_norm << "\n";
             if (res_norm < NEWTON_TOL) break;
 
             if (!factorized || iter % REFACTOR_EVERY == 0) {
@@ -1013,7 +1013,7 @@ int main() {
 
         Q_n = Q_new;
         time += dt;
-        std::cout << time << "\n";
+        // std::cout << time << "\n";
         step++;
 
     }
@@ -1022,7 +1022,7 @@ int main() {
     for (int i = 1; i < N - 1; ++i) {
         Vector3 Q = Q_new.segment<3>(3 * i);
         double u = get_u(Q);
-        std::cout << "i=" << i << " u=" << std::setprecision(10) << u << "\n";
+        // std::cout << "i=" << i << " u=" << std::setprecision(10) << u << "\n";
     }
 
     f_rho.close(); f_u.close(); f_p.close(); f_T.close(); f_energy.close();
