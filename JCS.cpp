@@ -210,6 +210,148 @@ void muscl_reconstruct(const Vector3& Ul2, const Vector3& Ul,
     Qr_face = Ur - 0.5 * dR;
 }
 
+Vector3 ausmPlusFlux(const Vector3& QL, const Vector3& QR) {
+    double rhoL = QL(0) / AREA, uL = get_u(QL), pL = get_pA(QL) / AREA;
+    double rhoR = QR(0) / AREA, uR = get_u(QR), pR = get_pA(QR) / AREA;
+    double HL = (QL(2) + pL * AREA) / QL(0);
+    double HR = (QR(2) + pR * AREA) / QR(0);
+    double cL = get_sound_speed(QL), cR = get_sound_speed(QR);
+    double c_half = 0.5 * (cL + cR);
+
+    double ML = uL / c_half, MR = uR / c_half;
+
+    // Mach splitting M±
+    double Mplus, Mminus;
+    if (std::abs(ML) >= 1.0)
+        Mplus = 0.5 * (ML + std::abs(ML));
+    else
+        Mplus = 0.25 * (ML + 1.0) * (ML + 1.0) + 0.125 * (ML * ML - 1.0) * (ML * ML - 1.0);
+
+    if (std::abs(MR) >= 1.0)
+        Mminus = 0.5 * (MR - std::abs(MR));
+    else
+        Mminus = -0.25 * (MR - 1.0) * (MR - 1.0) - 0.125 * (MR * MR - 1.0) * (MR * MR - 1.0);
+
+    // Pressure splitting p±
+    double pPlus, pMinus;
+    if (std::abs(ML) >= 1.0)
+        pPlus = 0.5 * (1.0 + std::copysign(1.0, ML));
+    else
+        pPlus = 0.25 * (ML + 1.0) * (ML + 1.0) * (2.0 - ML) + 0.1875 * ML * (ML * ML - 1.0) * (ML * ML - 1.0);
+
+    if (std::abs(MR) >= 1.0)
+        pMinus = 0.5 * (1.0 - std::copysign(1.0, MR));
+    else
+        pMinus = 0.25 * (MR - 1.0) * (MR - 1.0) * (2.0 + MR) - 0.1875 * MR * (MR * MR - 1.0) * (MR * MR - 1.0);
+
+    double M_half = Mplus + Mminus;
+    double p_half = pPlus * pL + pMinus * pR;
+
+    double mdot = c_half * (M_half > 0
+        ? M_half * rhoL
+        : M_half * rhoR);
+
+    Vector3 F;
+    if (mdot > 0) {
+        F(0) = mdot * AREA;
+        F(1) = mdot * uL * AREA + p_half * AREA;
+        F(2) = mdot * HL * AREA;
+    }
+    else {
+        F(0) = mdot * AREA;
+        F(1) = mdot * uR * AREA + p_half * AREA;
+        F(2) = mdot * HR * AREA;
+    }
+    return F;
+}
+
+Vector3 ausmPlusUpFlux(const Vector3& QL, const Vector3& QR) {
+    double rhoL = QL(0) / AREA, uL = get_u(QL), pL = get_pA(QL) / AREA;
+    double rhoR = QR(0) / AREA, uR = get_u(QR), pR = get_pA(QR) / AREA;
+    double HL = (QL(2) + pL * AREA) / QL(0);
+    double HR = (QR(2) + pR * AREA) / QR(0);
+    double cL = get_sound_speed(QL), cR = get_sound_speed(QR);
+
+    // Interface sound speed
+    double c_half = 0.5 * (cL + cR);
+
+    // Local Mach numbers
+    double ML = uL / c_half, MR = uR / c_half;
+
+    // Reference Mach for low-Mach fix
+    double M_bar2 = 0.5 * (uL * uL + uR * uR) / (c_half * c_half);
+    double M0_2 = std::min(1.0, std::max(M_bar2, 1e-6));
+    double M0 = std::sqrt(M0_2);
+    double fa = M0 * (2.0 - M0);  // f(M0), scaling function
+
+    // Parameters
+    double Kp = 0.25, Ku = 0.75, sigma = 1.0;
+
+    // --- M+ splitting ---
+    double Mplus, Mminus;
+    if (std::abs(ML) >= 1.0) {
+        Mplus = 0.5 * (ML + std::abs(ML));
+    }
+    else {
+        Mplus = 0.25 * (ML + 1.0) * (ML + 1.0)
+            + 0.125 * (ML * ML - 1.0) * (ML * ML - 1.0);
+    }
+
+    if (std::abs(MR) >= 1.0) {
+        Mminus = 0.5 * (MR - std::abs(MR));
+    }
+    else {
+        Mminus = -0.25 * (MR - 1.0) * (MR - 1.0)
+            - 0.125 * (MR * MR - 1.0) * (MR * MR - 1.0);
+    }
+
+    // --- Pressure diffusion in mass flux ---
+    double M_half = Mplus + Mminus
+        - (Kp / fa) * std::max(1.0 - sigma * M_bar2, 0.0) * (pR - pL) / (0.5 * (rhoL + rhoR) * c_half * c_half);
+
+    // Mass flux
+    double mdot;
+    if (M_half > 0)
+        mdot = c_half * M_half * rhoL;
+    else
+        mdot = c_half * M_half * rhoR;
+
+    // --- Pressure splitting p± ---
+    double pPlus, pMinus;
+    if (std::abs(ML) >= 1.0) {
+        pPlus = 0.5 * (1.0 + std::copysign(1.0, ML));
+    }
+    else {
+        pPlus = 0.25 * (ML + 1.0) * (ML + 1.0) * (2.0 - ML)
+            + 0.1875 * ML * (ML * ML - 1.0) * (ML * ML - 1.0);
+    }
+
+    if (std::abs(MR) >= 1.0) {
+        pMinus = 0.5 * (1.0 - std::copysign(1.0, MR));
+    }
+    else {
+        pMinus = 0.25 * (MR - 1.0) * (MR - 1.0) * (2.0 + MR)
+            - 0.1875 * MR * (MR * MR - 1.0) * (MR * MR - 1.0);
+    }
+
+    // --- Velocity diffusion in pressure ---
+    double p_half = pPlus * pL + pMinus * pR
+        - Ku * pPlus * pMinus * (rhoL + rhoR) * c_half * (uR - uL);
+
+    // --- Assemble flux ---
+    Vector3 F;
+    if (mdot > 0) {
+        F(0) = mdot * AREA;
+        F(1) = mdot * uL * AREA + p_half * AREA;
+        F(2) = mdot * HL * AREA;
+    }
+    else {
+        F(0) = mdot * AREA;
+        F(1) = mdot * uR * AREA + p_half * AREA;
+        F(2) = mdot * HR * AREA;
+    }
+    return F;
+}
 
 // =========== MAIN ===========
 
@@ -227,7 +369,12 @@ int main() {
         }
     }
 
-    double t_final = 1.0, time = 0.0, dt = 1e-3;
+    double t_final = 1.0, time = 0.0, dt = 1e-5;
+
+    double dt_local = dt;
+    double CFL = 0.5;
+    double CFL_max = 1e6;
+    double CFL_growth = 2.0;
     int step = 0;
 
     double eps = 1;
@@ -323,6 +470,44 @@ int main() {
         return R;
         };
 
+    // Residual for the AUSM+ fluxes formulation
+    auto cell_residual_ausm = [&](const VectorGlobal& Qvec, int cell) -> Vector3 {
+        Vector3 Uc = Qvec.segment<3>(3 * cell);
+        Vector3 Ul = (cell > 0) ? Qvec.segment<3>(3 * (cell - 1)) : leftFaceState(Uc);
+        Vector3 Ur = (cell < N - 1) ? Qvec.segment<3>(3 * (cell + 1)) : rightFaceState(Uc);
+
+        Vector3 F_left = (cell > 0) ? ausmPlusFlux(Ul, Uc) : computeFlux(Ul);
+        Vector3 F_right = (cell < N - 1) ? ausmPlusFlux(Uc, Ur) : computeFlux(Ur);
+
+        Vector3 R = (Uc - Q_n.segment<3>(3 * cell)) * (dx / dt)
+            + (F_right - F_left)
+            - computeSource(Uc) * dx;
+
+        R(2) += conductionResidual(Ul, Uc, Ur) * dx;
+        R(1) += viscMomResidual(Ul, Uc, Ur) * dx;
+        R(2) += viscEnResidual(Ul, Uc, Ur) * dx;
+        return R;
+        };
+
+    // Residual for the AUSM+Up fluxes formulation
+    auto cell_residual_ausmup = [&](const VectorGlobal& Qvec, int cell) -> Vector3 {
+        Vector3 Uc = Qvec.segment<3>(3 * cell);
+        Vector3 Ul = (cell > 0) ? Qvec.segment<3>(3 * (cell - 1)) : leftFaceState(Uc);
+        Vector3 Ur = (cell < N - 1) ? Qvec.segment<3>(3 * (cell + 1)) : rightFaceState(Uc);
+
+        Vector3 F_left = (cell > 0) ? ausmPlusUpFlux(Ul, Uc) : computeFlux(Ul);
+        Vector3 F_right = (cell < N - 1) ? ausmPlusUpFlux(Uc, Ur) : computeFlux(Ur);
+
+        Vector3 R = (Uc - Q_n.segment<3>(3 * cell)) * (dx / dt)
+            + (F_right - F_left)
+            - computeSource(Uc) * dx;
+
+        R(2) += conductionResidual(Ul, Uc, Ur) * dx;
+        R(1) += viscMomResidual(Ul, Uc, Ur) * dx;
+        R(2) += viscEnResidual(Ul, Uc, Ur) * dx;
+        return R;
+        };
+
     // Jacobian for the upwind fluxes formulation
     auto cell_jacobian_upwind = [&](const VectorGlobal& Qvec, int cell)
         -> std::tuple<Matrix3, Matrix3, Matrix3> {
@@ -408,26 +593,27 @@ int main() {
 
         }
         else {
+
             Jd = Matrix3::Identity() * (dx / dt)
                 + computeFluxJacobian(Uc)
                 - computeSourceJacobian(Uc) * dx;
             Jl = -computeFluxJacobian(Ul);
+
+            // Conduction → energy row (row 2)
+            Jd.row(2) += dx * dRcond_dQc(Uc);
+            Jr.row(2) += dx * dRcond_dQr(Ur);
+            Jl.row(2) += dx * dRcond_dQl(Ul);
+
+            // Viscosity momentum → row 1
+            Jd.row(1) += dx * dRviscMom_dQc(Uc);
+            Jr.row(1) += dx * dRviscMom_dQr(Ur);
+            Jl.row(1) += dx * dRviscMom_dQl(Ul);
+
+            // Viscosity energy → row 2
+            Jd.row(2) += dx * dRviscEn_dQc(Ul, Uc, Ur);
+            Jr.row(2) += dx * dRviscEn_dQr(Uc, Ur);
+            Jl.row(2) += dx * dRviscEn_dQl(Ul, Uc);
         }
-
-        // Conduction → energy row (row 2)
-        Jd.row(2) += dx * dRcond_dQc(Uc);
-        Jr.row(2) += dx * dRcond_dQr(Ur);
-        Jl.row(2) += dx * dRcond_dQl(Ul);
-
-        // Viscosity momentum → row 1
-        Jd.row(1) += dx * dRviscMom_dQc(Uc);
-        Jr.row(1) += dx * dRviscMom_dQr(Ur);
-        Jl.row(1) += dx * dRviscMom_dQl(Ul);
-
-        // Viscosity energy → row 2
-        Jd.row(2) += dx * dRviscEn_dQc(Ul, Uc, Ur);
-        Jr.row(2) += dx * dRviscEn_dQr(Uc, Ur);
-        Jl.row(2) += dx * dRviscEn_dQl(Ul, Uc);
 
         return { Jd, Jl, Jr };
         };
@@ -662,6 +848,87 @@ int main() {
         return { Jd, Jl, Jr };
         };
 
+    // Jacobian for the AUSM+ fluxes formulation
+    auto cell_jacobian_ausm = [&](const VectorGlobal& Qvec, int cell)
+        -> std::tuple<Matrix3, Matrix3, Matrix3> {
+
+        double fd_eps = 1e-7;
+        Matrix3 Jd, Jl, Jr;
+        Vector3 R0 = cell_residual_ausm(Qvec, cell);
+
+        // Jd: dR/dUc
+        for (int j = 0; j < 3; ++j) {
+            VectorGlobal Qp = Qvec;
+            Qp(3 * cell + j) += fd_eps;
+            Jd.col(j) = (cell_residual_ausm(Qp, cell) - R0) / fd_eps;
+        }
+
+        // Jl: dR/dU_{i-1}
+        if (cell > 0) {
+            for (int j = 0; j < 3; ++j) {
+                VectorGlobal Qp = Qvec;
+                Qp(3 * (cell - 1) + j) += fd_eps;
+                Jl.col(j) = (cell_residual_ausm(Qp, cell) - R0) / fd_eps;
+            }
+        }
+        else {
+            Jl = Matrix3::Zero();
+        }
+
+        // Jr: dR/dU_{i+1}
+        if (cell < N - 1) {
+            for (int j = 0; j < 3; ++j) {
+                VectorGlobal Qp = Qvec;
+                Qp(3 * (cell + 1) + j) += fd_eps;
+                Jr.col(j) = (cell_residual_ausm(Qp, cell) - R0) / fd_eps;
+            }
+        }
+        else {
+            Jr = Matrix3::Zero();
+        }
+
+        return { Jd, Jl, Jr };
+        };
+
+    // Jacobian for the AUSM+Up fluxes formulation
+    auto cell_jacobian_ausmup = [&](const VectorGlobal& Qvec, int cell)
+        -> std::tuple<Matrix3, Matrix3, Matrix3> {
+
+        double fd_eps = 1e-7;
+        Matrix3 Jd, Jl, Jr;
+        Vector3 R0 = cell_residual_ausm(Qvec, cell);
+
+        for (int j = 0; j < 3; ++j) {
+            VectorGlobal Qp = Qvec;
+            Qp(3 * cell + j) += fd_eps;
+            Jd.col(j) = (cell_residual_ausm(Qp, cell) - R0) / fd_eps;
+        }
+
+        if (cell > 0) {
+            for (int j = 0; j < 3; ++j) {
+                VectorGlobal Qp = Qvec;
+                Qp(3 * (cell - 1) + j) += fd_eps;
+                Jl.col(j) = (cell_residual_ausm(Qp, cell) - R0) / fd_eps;
+            }
+        }
+        else {
+            Jl = Matrix3::Zero();
+        }
+
+        if (cell < N - 1) {
+            for (int j = 0; j < 3; ++j) {
+                VectorGlobal Qp = Qvec;
+                Qp(3 * (cell + 1) + j) += fd_eps;
+                Jr.col(j) = (cell_residual_ausm(Qp, cell) - R0) / fd_eps;
+            }
+        }
+        else {
+            Jr = Matrix3::Zero();
+        }
+
+        return { Jd, Jl, Jr };
+        };
+
     std::cout << "FVM Solver (Euler + conduction + viscosity) | N=" << N
         << " | DOFs=" << 3 * N << "\n";
 
@@ -694,13 +961,13 @@ int main() {
                 Vector3 Ul = (i > 0) ? Q_new.segment<3>(3 * (i - 1)) : leftFaceState(Uc);
                 Vector3 Ur = (i < N - 1) ? Q_new.segment<3>(3 * (i + 1)) : rightFaceState(Uc);
 
-                Residual.segment<3>(3 * i) = cell_residual_rusanov(Q_new, i);
+                Residual.segment<3>(3 * i) = cell_residual_ausm(Q_new, i);
 
                 Matrix3 Jd = Matrix3::Zero();
                 Matrix3 Jl = Matrix3::Zero();
                 Matrix3 Jr = Matrix3::Zero();
 
-                std::tie(Jd, Jl, Jr) = cell_jacobian_rusanov(Q_new, i);
+                std::tie(Jd, Jl, Jr) = cell_jacobian_ausm(Q_new, i);
 
                 // --- Assemble ---
                 for (int r = 0; r < 3; r++) for (int c = 0; c < 3; c++) {
